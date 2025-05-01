@@ -1,9 +1,11 @@
 import os
 import sys
 import requests
+import asyncio
 import schedule
 import time
 from telegram import Bot
+from telegram.ext import Application
 
 # Ambil TOKEN dan CHAT_ID dari environment Railway
 TOKEN = os.getenv("TOKEN")
@@ -20,8 +22,8 @@ except ValueError:
     print("❌ ERROR: CHAT_ID harus berupa angka. Contoh: -1001234567890")
     sys.exit(1)
 
-# Inisialisasi bot
-bot = Bot(token=TOKEN)
+# Inisialisasi bot menggunakan aplikasi asynchronous
+application = Application.builder().token(TOKEN).build()
 
 # Fungsi untuk membaca domain dari file domain.txt
 def get_domain_list():
@@ -33,7 +35,7 @@ def get_domain_list():
         return []
 
 # Fungsi untuk mengecek apakah domain diblokir
-def cek_blokir():
+async def cek_blokir():
     domains = get_domain_list()
     pesan = []
 
@@ -50,7 +52,8 @@ def cek_blokir():
 
     if pesan:
         try:
-            bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
+            # Kirim pesan menggunakan bot Telegram dengan asynchronous
+            await application.bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
             print("✅ Pesan terkirim ke grup.")
         except Exception as e:
             print(f"❌ Gagal kirim pesan ke grup: {e}")
@@ -60,13 +63,20 @@ def cek_blokir():
     # Log pengecekan selesai
     print("✅ Pengecekan selesai pada:", time.strftime("%Y-%m-%d %H:%M:%S"))
 
-# Jadwalkan pengecekan setiap 1 menit
-schedule.every(1).minutes.do(cek_blokir)
+# Fungsi untuk menjalankan schedule pengecekan setiap 1 menit
+async def main():
+    # Jalankan pengecekan pertama kali dan terus periksa setiap menit
+    await cek_blokir()
 
-# Jalankan pengecekan pertama kali dan terus periksa setiap menit
-cek_blokir()
+    # Jadwalkan pengecekan setiap 1 menit
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(60)  # Menunggu 60 detik untuk pengecekan berikutnya
 
 # Loop untuk menjalankan pengecekan setiap menit
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+if __name__ == '__main__':
+    # Jadwalkan pengecekan setiap 1 menit
+    schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_blokir()))
+
+    # Jalankan aplikasi asynchronous
+    asyncio.run(main())
