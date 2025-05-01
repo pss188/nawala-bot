@@ -11,7 +11,6 @@ from telegram.ext import Application
 TOKEN = os.getenv("TOKEN")
 CHAT_ID_RAW = os.getenv("CHAT_ID")
 
-# Validasi awal
 if not TOKEN or not CHAT_ID_RAW:
     print("❌ ERROR: TOKEN atau CHAT_ID belum diset di Railway Variables.")
     sys.exit(1)
@@ -19,22 +18,24 @@ if not TOKEN or not CHAT_ID_RAW:
 try:
     CHAT_ID = int(CHAT_ID_RAW)
 except ValueError:
-    print("❌ ERROR: CHAT_ID harus berupa angka. Contoh: -1001234567890")
+    print("❌ ERROR: CHAT_ID harus berupa angka.")
     sys.exit(1)
 
-# Inisialisasi bot menggunakan aplikasi asynchronous
+# Inisialisasi bot
 application = Application.builder().token(TOKEN).build()
 
-# Fungsi untuk membaca domain dari file domain.txt
+# Fungsi membaca domain
 def get_domain_list():
     try:
         with open("domain.txt", "r") as f:
-            return [line.strip() for line in f if line.strip()]
+            domains = [line.strip() for line in f if line.strip()]
+            print("📄 Domain yang dibaca dari domain.txt:", domains)  # Log di sini
+            return domains
     except Exception as e:
         print(f"❌ Gagal membaca domain.txt: {e}")
         return []
 
-# Fungsi untuk mengecek apakah domain diblokir
+# Fungsi cek blokir
 async def cek_blokir():
     domains = get_domain_list()
     pesan = []
@@ -44,7 +45,8 @@ async def cek_blokir():
         try:
             response = requests.get(url, timeout=5)
             data = response.json()
-            # Mengecek jika 'blocked' bernilai True untuk domain
+            print(f"🔍 Respons dari API untuk {domain}:", data)  # Log respons API
+
             if data.get(domain, {}).get("blocked", False):
                 pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
         except Exception as e:
@@ -52,31 +54,23 @@ async def cek_blokir():
 
     if pesan:
         try:
-            # Kirim pesan menggunakan bot Telegram dengan asynchronous
             await application.bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
             print("✅ Pesan terkirim ke grup.")
         except Exception as e:
-            print(f"❌ Gagal kirim pesan ke grup: {e}")
+            print(f"❌ Gagal kirim pesan ke Telegram: {e}")
     else:
         print("✅ Tidak ada domain yang diblokir.")
 
-    # Log pengecekan selesai
-    print("✅ Pengecekan selesai pada:", time.strftime("%Y-%m-%d %H:%M:%S"))
+    print("🕒 Pengecekan selesai:", time.strftime("%Y-%m-%d %H:%M:%S"))
 
-# Fungsi untuk menjalankan schedule pengecekan setiap 1 menit
+# Fungsi main loop
 async def main():
-    # Jalankan pengecekan pertama kali dan terus periksa setiap menit
     await cek_blokir()
-
-    # Jadwalkan pengecekan setiap 1 menit
     while True:
         schedule.run_pending()
-        await asyncio.sleep(60)  # Menunggu 60 detik untuk pengecekan berikutnya
+        await asyncio.sleep(60)
 
-# Loop untuk menjalankan pengecekan setiap menit
-if __name__ == '__main__':
-    # Jadwalkan pengecekan setiap 1 menit
+# Jalankan
+if __name__ == "__main__":
     schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_blokir()))
-
-    # Jalankan aplikasi asynchronous
     asyncio.run(main())
