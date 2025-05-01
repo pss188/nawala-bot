@@ -1,8 +1,8 @@
 import os
 import sys
-import time
 import requests
 import schedule
+import time
 from telegram import Bot
 
 # Ambil TOKEN dan CHAT_ID dari environment Railway
@@ -20,6 +20,7 @@ except ValueError:
     print("❌ ERROR: CHAT_ID harus berupa angka. Contoh: -1001234567890")
     sys.exit(1)
 
+# Inisialisasi bot
 bot = Bot(token=TOKEN)
 
 # Fungsi untuk membaca domain dari file domain.txt
@@ -31,7 +32,7 @@ def get_domain_list():
         print(f"❌ Gagal membaca domain.txt: {e}")
         return []
 
-# Fungsi utama: cek apakah domain diblokir
+# Fungsi untuk mengecek apakah domain diblokir
 def cek_blokir():
     domains = get_domain_list()
     pesan = []
@@ -41,7 +42,8 @@ def cek_blokir():
         try:
             response = requests.get(url, timeout=5)
             data = response.json()
-            if data.get("blocked", False):
+            # Mengecek jika 'blocked' bernilai True untuk domain
+            if data.get(domain, {}).get("blocked", False):
                 pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
         except Exception as e:
             pesan.append(f"⚠️ Gagal cek {domain}: {e}")
@@ -52,14 +54,19 @@ def cek_blokir():
             print("✅ Pesan terkirim ke grup.")
         except Exception as e:
             print(f"❌ Gagal kirim pesan ke grup: {e}")
+    else:
+        print("✅ Tidak ada domain yang diblokir.")
 
-# Jalankan saat pertama kali bot aktif
+    # Log pengecekan selesai
+    print("✅ Pengecekan selesai pada:", time.strftime("%Y-%m-%d %H:%M:%S"))
+
+# Jadwalkan pengecekan setiap 1 menit
+schedule.every(1).minutes.do(cek_blokir)
+
+# Jalankan pengecekan pertama kali dan terus periksa setiap menit
 cek_blokir()
 
-# Jadwalkan cek setiap 5 menit
-schedule.every(5).minutes.do(cek_blokir)
-
-# Loop terus
+# Loop untuk menjalankan pengecekan setiap menit
 while True:
     schedule.run_pending()
     time.sleep(1)
