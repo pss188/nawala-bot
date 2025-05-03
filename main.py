@@ -76,9 +76,8 @@ async def scheduler():
 
     while True:
         # Menjalankan semua pekerjaan yang dijadwalkan
-        for job in schedule.get_jobs():  # Mengambil semua pekerjaan yang dijadwalkan
-            if job.last_run is None or (job.last_run and (job.last_run + job.interval) <= schedule.get_time()):
-                asyncio.create_task(job.job_func())  # Membuat task baru untuk menjalankan job
+        for job in schedule.default_scheduler.jobs:  # Mengakses job dari scheduler langsung
+            asyncio.create_task(job.job_func())  # Membuat task baru untuk menjalankan job
         await asyncio.sleep(1)  # Tidur sebentar sebelum mengecek lagi
 
 # Jalankan
