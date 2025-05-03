@@ -1,9 +1,11 @@
 import os
 import sys
-import aiohttp
+import requests
 import asyncio
-import aioschedule as schedule
+import schedule
+import time
 from telegram import Bot
+from telegram.ext import Application
 
 # Ambil TOKEN dan CHAT_ID dari environment Railway
 TOKEN = os.getenv("TOKEN")
@@ -20,17 +22,17 @@ except ValueError:
     sys.exit(1)
 
 # Inisialisasi bot
-bot = Bot(token=TOKEN)
+application = Application.builder().token(TOKEN).build()
 
-# Fungsi membaca domain dari file
+# Fungsi membaca domain
 def get_domain_list():
     try:
         with open("domain.txt", "r") as f:
             domains = [line.strip() for line in f if line.strip()]
-            print("📄 Domain yang dibaca:", domains)
+            print("📄 Domain yang dibaca dari domain.txt:", domains)  # Log di sini
             return domains
     except Exception as e:
-        print(f"❌ Gagal baca domain.txt: {e}")
+        print(f"❌ Gagal membaca domain.txt: {e}")
         return []
 
 # Fungsi cek blokir
@@ -38,47 +40,37 @@ async def cek_blokir():
     domains = get_domain_list()
     pesan = []
 
-    async with aiohttp.ClientSession() as session:
-        for domain in domains:
-            url = f'https://check.skiddle.id/?domains={domain}'
-            try:
-                async with session.get(url, timeout=5) as response:
-                    data = await response.json()
-                    print(f"🔍 Respons untuk {domain}:", data)
-                    if data.get(domain, {}).get("blocked", False):
-                        pesan.append(f"🚫 *{domain}* terdeteksi nawala.")
-            except Exception as e:
-                pesan.append(f"⚠️ Gagal cek {domain}: {e}")
+    for domain in domains:
+        url = f'https://check.skiddle.id/?domains={domain}'
+        try:
+            response = requests.get(url, timeout=5)
+            data = response.json()
+            print(f"🔍 Respons dari API untuk {domain}:", data)  # Log respons API
+
+            if data.get(domain, {}).get("blocked", False):
+                pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
+        except Exception as e:
+            pesan.append(f"⚠️ Gagal cek {domain}: {e}")
 
     if pesan:
         try:
-            await bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
-            print("✅ Pesan dikirim ke Telegram.")
+            await application.bot.send_message(chat_id=CHAT_ID, text="\n".join(pesan), parse_mode="Markdown")
+            print("✅ Pesan terkirim ke grup.")
         except Exception as e:
-            print(f"❌ Gagal kirim pesan: {e}")
+            print(f"❌ Gagal kirim pesan ke Telegram: {e}")
     else:
         print("✅ Tidak ada domain yang diblokir.")
-    print("🕒 Pengecekan selesai.")
 
-# Fungsi kirim status server
-async def kirim_status_server():
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text="✅ Status Bot On", parse_mode="Markdown")
-        print("🟢 Status bot dikirim.")
-    except Exception as e:
-        print(f"❌ Gagal kirim status server: {e}")
+    print("🕒 Pengecekan selesai:", time.strftime("%Y-%m-%d %H:%M:%S"))
 
-# Scheduler
-async def scheduler():
-    # Scheduling task dengan async
-    schedule.every(1).minutes.do(cek_blokir)  # Menjadwalkan cek_blokir
-    schedule.every(3).hours.do(kirim_status_server)  # Menjadwalkan kirim_status_server
-
+# Fungsi main loop
+async def main():
+    await cek_blokir()
     while True:
-        # Menjalankan semua pekerjaan yang dijadwalkan
-        await schedule.run_pending()  # Ini yang benar untuk menjalankan job yang sudah dijadwalkan
-        await asyncio.sleep(1)  # Tidur sebentar sebelum mengecek lagi
+        schedule.run_pending()
+        await asyncio.sleep(60)
 
 # Jalankan
 if __name__ == "__main__":
-    asyncio.run(scheduler())  # Menjalankan event loop utama
+    schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_blokir()))
+    asyncio.run(main())
