@@ -56,7 +56,7 @@ async def cek_domain():
         try:
             response = requests.get(f'https://check.skiddle.id/?domains={domain}', timeout=10)
             if response.json().get(domain, {}).get("blocked", False):
-                hasil.append(f"🚫 *{domain}* terblokir!")
+                hasil.append(f"🚫 *{domain}* nawala!")
         except Exception as e:
             logger.error(f"Error cek {domain}: {e}")
 
