@@ -2,12 +2,12 @@ import os
 import sys
 import asyncio
 import requests
-import schedule
+import aioschedule as schedule
 import time
 from telegram import Bot
 from telegram.ext import Application
 
-# Setup logging
+# Logging
 import logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -23,7 +23,7 @@ if not TOKEN or not CHAT_ID:
     logger.error("Token atau Chat ID tidak ditemukan!")
     sys.exit(1)
 
-# Bot setup
+# Setup bot
 application = Application.builder().token(TOKEN).build()
 
 async def kirim_status():
@@ -31,10 +31,10 @@ async def kirim_status():
         waktu = time.strftime("%d-%m-%Y %H:%M:%S")
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🤖 *Bot Aktif* ({waktu})\nSistem berjalan normal!",
+            text=f"🤖 *Status Bot On* ({waktu})\nSistem berjalan normal!",
             parse_mode="Markdown"
         )
-        logger.info("Status terkirim")
+        logger.info("Status bot terkirim")
     except Exception as e:
         logger.error(f"Gagal kirim status: {e}")
 
@@ -56,7 +56,7 @@ async def cek_domain():
         try:
             response = requests.get(f'https://check.skiddle.id/?domains={domain}', timeout=10)
             if response.json().get(domain, {}).get("blocked", False):
-                hasil.append(f"🚫 *{domain}* terblokir!")
+                hasil.append(f"🚫 *{domain}* terkena nawala!")
         except Exception as e:
             logger.error(f"Error cek {domain}: {e}")
 
@@ -67,22 +67,19 @@ async def cek_domain():
             parse_mode="Markdown"
         )
 
-async def tugas_utama():
-    # Jadwalkan tugas
-    schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_domain()))
-    schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
-    
-    # Jalankan segera
+async def scheduler():
+    schedule.every(1).minutes.do(cek_domain)
+    schedule.every(1).hours.do(kirim_status)
+
     await cek_domain()
     await kirim_status()
 
-    # Loop utama
     while True:
-        schedule.run_pending()
+        await schedule.run_pending()
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(tugas_utama())
+        asyncio.run(scheduler())
     except Exception as e:
         logger.error(f"Bot error: {e}")
