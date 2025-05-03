@@ -33,7 +33,7 @@ def get_domain_list():
         print(f"❌ Gagal membaca domain.txt: {e}")
         return []
 
-# Fungsi untuk cek apakah domain diblokir
+# Fungsi cek apakah domain diblokir
 async def cek_blokir():
     domains = get_domain_list()
     pesan = []
@@ -47,7 +47,7 @@ async def cek_blokir():
                     print(f"🔍 Respons dari API untuk {domain}:", data)
 
                     if data.get(domain, {}).get("blocked", False):
-                        pesan.append(f"🚫 *{domain}* nawala.")
+                        pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
             except Exception as e:
                 pesan.append(f"⚠️ Gagal cek {domain}: {e}")
 
@@ -62,15 +62,15 @@ async def cek_blokir():
 
     print("🕒 Pengecekan selesai.")
 
-# Fungsi laporan status server setiap 3 jam
+# Fungsi kirim status server setiap 3 jam
 async def kirim_status_server():
     try:
-        await application.bot.send_message(chat_id=CHAT_ID, text="✅ Bot on tanpa kendala.", parse_mode="Markdown")
+        await application.bot.send_message(chat_id=CHAT_ID, text="✅ Server masih aktif dan berjalan seperti biasa.", parse_mode="Markdown")
         print("🟢 Status server dikirim ke Telegram.")
     except Exception as e:
         print(f"❌ Gagal kirim status server: {e}")
 
-# Scheduler async loop
+# Scheduler
 async def scheduler():
     await schedule.every(1).minutes.do(cek_blokir)
     await schedule.every(3).hours.do(kirim_status_server)
@@ -79,7 +79,7 @@ async def scheduler():
         await schedule.run_pending()
         await asyncio.sleep(1)
 
-# Fungsi utama
+# Main
 async def main():
     await application.initialize()
     await application.start()
