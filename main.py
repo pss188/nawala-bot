@@ -48,7 +48,7 @@ async def cek_blokir():
             print(f"🔍 Respons dari API untuk {domain}:", data)  # Log respons API
 
             if data.get(domain, {}).get("blocked", False):
-                pesan.append(f"🚫 *{domain}* kemungkinan diblokir.")
+                pesan.append(f"🚫 *{domain}* terdeteksi nawala.")
         except Exception as e:
             pesan.append(f"⚠️ Gagal cek {domain}: {e}")
 
