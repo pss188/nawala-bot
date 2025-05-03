@@ -1,4 +1,4 @@
-requests
-aioschedule
-python-telegram-bot
-schedule
+python-telegram-bot==20.3
+requests==2.31.0
+schedule==1.2.0
+aiohttp==3.8.5
