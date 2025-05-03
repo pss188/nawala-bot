@@ -76,10 +76,8 @@ async def scheduler():
 
     # Loop untuk menjalankan semua pekerjaan yang dijadwalkan
     while True:
-        # Melakukan pending task
-        for job in schedule.get_jobs():
-            # Pastikan setiap job yang dijadwalkan di-run
-            asyncio.create_task(job.job_func())
+        # Menjalankan semua pekerjaan yang dijadwalkan
+        await schedule.run_pending()
         await asyncio.sleep(1)  # Menghindari loop yang terlalu cepat dan membebani CPU
 
 # Jalankan
