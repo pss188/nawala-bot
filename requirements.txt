@@ -1,3 +1,4 @@
 requests
 aioschedule
 python-telegram-bot
+schedule
