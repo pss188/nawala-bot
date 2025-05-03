@@ -76,8 +76,7 @@ async def scheduler():
 
     while True:
         # Menjalankan semua pekerjaan yang dijadwalkan
-        for job in schedule.default_scheduler.jobs:  # Mengakses job dari scheduler langsung
-            asyncio.create_task(job.job_func())  # Membuat task baru untuk menjalankan job
+        await schedule.run_pending()  # Ini yang benar untuk menjalankan job yang sudah dijadwalkan
         await asyncio.sleep(1)  # Tidur sebentar sebelum mengecek lagi
 
 # Jalankan
