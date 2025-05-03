@@ -31,7 +31,7 @@ async def kirim_status():
         waktu = time.strftime("%d-%m-%Y %H:%M:%S")
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🤖 *Bot Aktif* ({waktu})\nSistem berjalan normal!",
+            text=f"🤖 *Bot Aktif* berjalan normal!",
             parse_mode="Markdown"
         )
         logger.info("Status bot terkirim")
