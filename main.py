@@ -70,11 +70,17 @@ async def kirim_status_server():
 
 # Scheduler
 async def scheduler():
+    # Scheduling task dengan async
     schedule.every(1).minutes.do(lambda: asyncio.create_task(cek_blokir()))  # Menjadwalkan cek_blokir
     schedule.every(3).hours.do(lambda: asyncio.create_task(kirim_status_server()))  # Menjadwalkan kirim_status_server
+
+    # Loop untuk menjalankan semua pekerjaan yang dijadwalkan
     while True:
-        await schedule.run_pending()  # Menjalankan semua pekerjaan yang dijadwalkan
-        await asyncio.sleep(1)  # Menunggu 1 detik agar tidak terlalu membebani CPU
+        # Melakukan pending task
+        for job in schedule.get_jobs():
+            # Pastikan setiap job yang dijadwalkan di-run
+            asyncio.create_task(job.job_func())
+        await asyncio.sleep(1)  # Menghindari loop yang terlalu cepat dan membebani CPU
 
 # Jalankan
 if __name__ == "__main__":
