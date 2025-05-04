@@ -5,7 +5,7 @@ bsresmi.sbs
 betseru11.store
 betseru11.quest
 kitapastiyakin.shop
-rtpbsmenang.pages.dev
+rtpbetserunew.pages.dev
 b119338.com
 bbjaya.hair
 bboke.online
