@@ -1,5 +1,4 @@
 bsresmi.cfd
-bsresmi.cyou
 bsresmi.sbs
 betseru11.store
 betseru11.quest
