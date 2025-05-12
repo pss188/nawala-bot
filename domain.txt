@@ -1,5 +1,4 @@
 bsresmi.cfd
-bsresmi.sbs
 bsresmi.boats
 bsresmi.click
 betseru11.store
@@ -9,7 +8,6 @@ rtpbetserunew.pages.dev
 b119338.com
 bsresmi.autos
 bsresmi.beauty
-bboke.store
 bboke.website
 bboke.space
 bboke.cfd
