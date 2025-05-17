@@ -38,3 +38,5 @@ gedepaten.online
 gedepaten.site
 jendelatt.online
 jendelatt.site
+nakatadmd.com
+gedemanjur.com
