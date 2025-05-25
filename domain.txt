@@ -4,8 +4,6 @@ bboke.boats
 bboke.homes
 bboke.lol
 bboke.makeup
-betseru11.quest
-betseru11.store
 bsresmi.cfd
 bsresmi.homes
 bsresmi.lol
@@ -34,7 +32,6 @@ jendelatt.website
 kitapastiyakin.shop
 mensfashionforward.com
 nakatadmd.com
-nutritionaltree.com
 procseo.com
 rtpbangbosnew.pages.dev
 rtpbetserunew.pages.dev
