@@ -35,3 +35,4 @@ rtpbangbosnew.pages.dev
 rtpbetserunew.pages.dev
 bboke.click
 surgaseru.pages.dev
+jangan-di-gas-lah-bang.pages.dev
