@@ -4,7 +4,6 @@ bboke.homes
 bboke.lol
 bboke.makeup
 bsresmi.cfd
-bsresmi.lol
 bsresmi.makeup
 bsresmi.mom
 bsresmi.motorcycles
@@ -12,7 +11,6 @@ dogplayoutdoors.com
 gede1.mom
 gedemanjur.com
 gedepaten.com
-gedepaten.online
 gedepaten.shop
 gedepaten.store
 hkb1.cfd
@@ -24,7 +22,6 @@ hotfoxbranding.com
 jendelartpnew.pages.dev
 jendelatoto.it.com
 jendelatoto1.com
-jendelatt.site
 jendelatt.store
 jendelatt.website
 kitapastiyakin.shop
@@ -34,5 +31,5 @@ procseo.com
 rtpbangbosnew.pages.dev
 rtpbetserunew.pages.dev
 bboke.click
-surgaseru.pages.dev
+seruanaja.pages.dev
 jangan-di-gas-lah-bang.pages.dev
