@@ -27,7 +27,6 @@ seruanaja.pages.dev
 bsresmi.yachts
 bsresmi.monster
 bsresmi.hair
-bboke.mom
 bboke.motorcycles
 bboke.pics
 bboke.quest
