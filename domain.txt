@@ -24,7 +24,6 @@ rtpbetserunew.pages.dev
 rtpslotgacorjendela.pages.dev
 seruanaja.pages.dev
 กรุณาอย่าเติมน้ํามัน.pages.dev
-bsresmi.yachts
 bsresmi.monster
 bsresmi.hair
 bboke.motorcycles
