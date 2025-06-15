@@ -25,7 +25,6 @@ rtpbangbosnew.pages.dev
 rtpbetserunew.pages.dev
 rtpslotgacorjendela.pages.dev
 กรุณาอย่าเติมน้ํามัน.pages.dev
-bsresmi.hair
 bboke.yachts
 bboke.monster
 bboke.quest
