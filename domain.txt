@@ -31,4 +31,3 @@ bboke.monster
 bboke.quest
 bboke.xyz
 xn--12c0bgqa0cbeh5h2bfcd1a1dvi1fza4f.pages.dev
-jendelatt.space
