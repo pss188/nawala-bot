@@ -39,3 +39,6 @@ bbpaten.store
 bbpaten.website
 jendelatt.icu
 jendelatt.lol
+bshoki.cyou
+bshoki.icu
+bshoki.lol
