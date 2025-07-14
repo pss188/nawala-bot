@@ -34,3 +34,7 @@ hkbwdcom.pages.dev
 bbpaten.cfd
 bbpaten.cyou
 bbpaten.icu
+hkb1.org
+hkb1.net
+mvphoki.site
+mvphoki.store
