@@ -32,3 +32,6 @@ bshoki.beauty
 bshoki.boats
 bshoki.bond
 hkbwdcom.pages.dev
+bbpaten.cfd
+bbpaten.cyou
+bbpaten.icu
