@@ -35,3 +35,7 @@ hkb1.org
 hkb1.net
 mvphoki.site
 mvphoki.store
+bbpaten.autos
+bbpaten.beauty
+bbpaten.boats
+bbpaten.bond
