@@ -27,7 +27,6 @@ bshoki.boats
 bshoki.bond
 hkbwdcom.pages.dev
 bbpaten.cyou
-bbpaten.icu
 hkb1.org
 hkb1.net
 mvphoki.site
