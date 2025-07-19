@@ -35,3 +35,7 @@ bbpaten.autos
 bbpaten.beauty
 bbpaten.boats
 bbpaten.bond
+bshoki.homes
+bshoki.makeup
+bshoki.mom
+bshoki.motorcycles
