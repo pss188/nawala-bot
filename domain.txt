@@ -36,3 +36,5 @@ bshoki.homes
 bshoki.makeup
 bshoki.mom
 bshoki.motorcycles
+jendelatt.boats
+jendelatt.bond
