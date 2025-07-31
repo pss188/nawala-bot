@@ -34,6 +34,5 @@ hkb1.xyz
 hkb1.icu
 jendelatt.makeup
 hkb1.autos
-hkb1.beauty
 hkb1.boats
 jendelatt.mom
