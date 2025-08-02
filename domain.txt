@@ -22,7 +22,6 @@ mvphoki.site
 mvphoki.store
 bbpaten.boats
 bbpaten.bond
-bshoki.homes
 bshoki.makeup
 bshoki.mom
 bshoki.motorcycles
