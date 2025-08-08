@@ -37,5 +37,6 @@ bshoki.yachts
 bshoki.monster
 jendelatt.motorcycles
 jendelatt.pics
+jendelamvp.com
 hkb1.bond
 hkb1.click
