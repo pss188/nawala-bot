@@ -35,3 +35,6 @@ jendelatt.rest
 hkb1.bond
 hkb1.click
 hkbpokerqqid2.pages.dev
+bbpaten.makeup
+bbpaten.mom
+bbpaten.motorcycles
