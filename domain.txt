@@ -28,7 +28,6 @@ bshoki.rest
 bshoki.skin
 bshoki.yachts
 bshoki.monster
-jendelatt.motorcycles
 jendelamvp.com
 jendelatt.rest
 hkb1.bond
