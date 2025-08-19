@@ -19,7 +19,6 @@ hkb1.autos
 hkb1.boats
 jendeladana.com
 jendelaresmi.com
-jendelatt.quest
 bbpaten.homes
 bbpaten.lol
 bshoki.skin
