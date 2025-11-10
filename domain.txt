@@ -17,7 +17,6 @@ jendelaresmi.sbs
 jendelaresmi.cyou
 jendelaresmi.cfd
 bbpaten.pics
-bbpaten.quest
 bbpaten.rest
 bbpaten.skin
 jendelatop.com
