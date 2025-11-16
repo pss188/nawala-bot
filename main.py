@@ -207,7 +207,8 @@ async def kirim_status():
             "🤖 *Bot TrustPositif Aktif*\n"
             f"✅ Status: Monitoring\n"
             f"⏰ {waktu}\n"
-            f"🔍 Auto-check 2 menit"
+            f"🔍 Auto-check 2 menit\n"
+            f"📋 List {total_domains}Domain: https://ceknawalaonline.pro/grup49/"
         )
         
         await application.bot.send_message(
