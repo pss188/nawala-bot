@@ -1,10 +1,11 @@
 import os
 import sys
 import asyncio
-import aiohttp
+import requests
 import schedule
 import time
 import json
+import re
 from datetime import datetime
 from telegram import Bot
 from telegram.ext import Application
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Config
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-NAWALA_API_URL = "https://www.nawala.asia/api/check"  # API seperti di website
+NAWALA_API_URL = "https://www.nawala.asia/api/check"
 
 if not TOKEN or not CHAT_ID:
     logger.error("Token atau Chat ID tidak ditemukan!")
@@ -31,15 +32,10 @@ application = Application.builder().token(TOKEN).build()
 
 class DomainChecker:
     def __init__(self):
-        self.session = None
-        
-    async def init_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-    
-    async def close_session(self):
-        if self.session:
-            await self.session.close()
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
     
     def extract_domain(self, url):
         """Extract domain from URL like the JavaScript function"""
@@ -59,7 +55,6 @@ class DomainChecker:
             
             # Validate domain format
             domain_regex = r'^(?!:\/\/)([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$'
-            import re
             if re.match(domain_regex, domain):
                 return domain.lower()
             return None
@@ -74,7 +69,7 @@ class DomainChecker:
                 domains = []
                 for line in f:
                     line = line.strip()
-                    if line:
+                    if line and not line.startswith('#'):
                         domain = self.extract_domain(line)
                         if domain:
                             domains.append(domain)
@@ -87,64 +82,62 @@ class DomainChecker:
             logger.error(f"Error reading domain.txt: {e}")
             return []
     
-    async def cek_nawala_api(self, domains):
+    def cek_nawala_api(self, domains):
         """Check domains using NawalaAsia-like API"""
         try:
-            await self.init_session()
-            
             # Prepare data like the website
             domains_text = "\n".join(domains)
             data = {
                 "domains": domains_text,
-                "recaptchaToken": "dummy_token"  # Placeholder
+                "recaptchaToken": "dummy_token"
             }
             
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            async with self.session.post(NAWALA_API_URL, data=data, headers=headers, timeout=30) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    return result
-                else:
-                    logger.error(f"API error: {response.status}")
-                    return None
-                    
+            response = self.session.post(NAWALA_API_URL, data=data, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"API error: {response.status_code}")
+                return None
+                
         except Exception as e:
             logger.error(f"Error checking Nawala API: {e}")
             return None
     
-    async def cek_domain_alternative(self, domain):
+    def cek_domain_alternative(self, domain):
         """Alternative checking method if API fails"""
         try:
-            await self.init_session()
-            
             # Try multiple methods
             check_urls = [
                 f"https://check.skiddle.id/?domains={domain}",
-                f"http://{domain}",  # Direct check
             ]
             
             for url in check_urls:
                 try:
-                    async with self.session.get(url, timeout=10, allow_redirects=True) as response:
-                        # Analyze response for blocking patterns
-                        content = await response.text()
+                    response = self.session.get(url, timeout=10, allow_redirects=True)
+                    
+                    if response.status_code == 200:
+                        # For Skiddle API
+                        if "skiddle.id" in url:
+                            data = response.json()
+                            if domain in data and data[domain].get("blocked", False):
+                                return {"domain": domain, "status": "Blocked"}
+                            else:
+                                return {"domain": domain, "status": "Not Blocked"}
                         
-                        # Check for Nawala blocking patterns
+                        # Direct check content analysis
+                        content = response.text.lower()
                         blocking_indicators = [
                             "nawala", "trustpositif", "kominfo", "blokir",
-                            "180.131.144", "180.131.145"  # Nawala IP ranges
+                            "180.131.144", "180.131.145"
                         ]
                         
-                        if any(indicator in content.lower() for indicator in blocking_indicators):
+                        if any(indicator in content for indicator in blocking_indicators):
                             return {"domain": domain, "status": "Blocked"}
                             
                         return {"domain": domain, "status": "Not Blocked"}
                         
                 except Exception as e:
+                    logger.warning(f"Check failed for {url}: {e}")
                     continue
             
             return {"domain": domain, "status": "Unknown"}
@@ -162,8 +155,8 @@ class DomainChecker:
         
         logger.info(f"Memulai pengecekan {len(domains)} domain...")
         
-        # Try Nawala API first
-        api_result = await self.cek_nawala_api(domains)
+        # Try Nawala API first (sync)
+        api_result = self.cek_nawala_api(domains)
         
         blocked_domains = []
         if api_result and api_result.get("status") == "success":
@@ -171,15 +164,15 @@ class DomainChecker:
             for item in api_result.get("data", []):
                 if item.get("status") == "Blocked":
                     blocked_domains.append(item.get("domain"))
+                    logger.info(f"Domain diblokir (API): {item.get('domain')}")
         else:
             # Fallback to alternative checking
             logger.info("Menggunakan metode pengecekan alternatif...")
-            tasks = [self.cek_domain_alternative(domain) for domain in domains]
-            results = await asyncio.gather(*tasks)
-            
-            for result in results:
+            for domain in domains:
+                result = self.cek_domain_alternative(domain)
                 if result.get("status") == "Blocked":
                     blocked_domains.append(result.get("domain"))
+                    logger.info(f"Domain diblokir (Alternative): {result.get('domain')}")
         
         # Send notification if blocked domains found
         if blocked_domains:
@@ -245,8 +238,6 @@ async def tugas_utama():
             
     except Exception as e:
         logger.error(f"Error dalam tugas utama: {e}")
-    finally:
-        await checker.close_session()
 
 if __name__ == "__main__":
     try:
@@ -257,6 +248,8 @@ if __name__ == "__main__":
                 f.write("# Satu domain per baris\n")
                 f.write("example.com\n")
                 f.write("google.com\n")
+                f.write("youtube.com\n")
+                f.write("facebook.com\n")
             logger.info("File domain.txt created with examples")
         
         asyncio.run(tugas_utama())
