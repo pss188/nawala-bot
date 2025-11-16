@@ -141,7 +141,7 @@ class DomainChecker:
             return {"domain": domain, "status": "Error", "source": "Error"}
     
     async def cek_domain(self):
-        """Main domain checking function"""
+        """Main domain checking function - hanya kirim laporan jika ada yang diblokir"""
         domains = self.baca_domain()
         if not domains:
             return
@@ -170,26 +170,23 @@ class DomainChecker:
                         "source": result.get("source", "Unknown")
                     })
         
-        # Send simple report
-        await self.kirim_laporan_simple(blocked_domains, len(domains))
+        # Hanya kirim laporan jika ada domain yang diblokir
+        if blocked_domains:
+            await self.kirim_laporan_simple(blocked_domains, len(domains))
+        else:
+            logger.info("Tidak ada domain yang diblokir - skip laporan")
     
     async def kirim_laporan_simple(self, blocked_domains, total_domains):
-        """Send simple report to Telegram"""
+        """Send simple report to Telegram hanya jika ada yang diblokir"""
         try:
             waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
             
-            if blocked_domains:
-                message = "📋 *Domain Terblokir:*\n"
-                for item in blocked_domains:
-                    message += f"🚫 {item['domain']} Blocked! 🔧 {item['source']}\n"
-                
-                message += f"\n📊 {len(blocked_domains)} dari {total_domains} domain\n"
-                message += f"⏰ {waktu}"
-                
-            else:
-                message = f"✅ *Semua Domain Aman!*\n\n"
-                message += f"📊 0 dari {total_domains} domain terblokir\n"
-                message += f"⏰ {waktu}"
+            message = "📋 *Domain Terblokir:*\n"
+            for item in blocked_domains:
+                message += f"🚫 {item['domain']} Blocked! 🔧 {item['source']}\n"
+            
+            message += f"\n📊 {len(blocked_domains)} dari {total_domains} domain\n"
+            message += f"⏰ {waktu}"
             
             await application.bot.send_message(
                 chat_id=CHAT_ID,
@@ -197,21 +194,20 @@ class DomainChecker:
                 parse_mode="Markdown"
             )
             
-            logger.info(f"Report sent: {len(blocked_domains)} blocked domains")
+            logger.info(f"Laporan terblokir terkirim: {len(blocked_domains)} domain")
             
         except Exception as e:
-            logger.error(f"Failed to send report: {e}")
+            logger.error(f"Gagal kirim laporan: {e}")
 
 async def kirim_status():
-    """Send bot status"""
+    """Send bot status setiap 30 menit"""
     try:
         waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         message = (
             "🤖 *Bot TrustPositif Aktif*\n"
-            f"✅ Status: Normal\n"
+            f"✅ Status: Monitoring\n"
             f"⏰ {waktu}\n"
-            f"🔍 Auto-check 5 menit\n"
-            f"📋 Daftar Domain: https://ceknawalaonline.pro/grup49/"
+            f"🔍 Auto-check 2 menit"
         )
         
         await application.bot.send_message(
@@ -219,23 +215,27 @@ async def kirim_status():
             text=message,
             parse_mode="Markdown"
         )
+        logger.info("Status bot terkirim")
     except Exception as e:
-        logger.error(f"Failed to send status: {e}")
+        logger.error(f"Gagal kirim status: {e}")
 
 async def tugas_utama():
     """Main task scheduler"""
     checker = DomainChecker()
     
     try:
-        # Schedule tasks
-        schedule.every(5).minutes.do(lambda: asyncio.create_task(checker.cek_domain()))
-        schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
+        # Schedule tasks sesuai permintaan
+        schedule.every(2).minutes.do(lambda: asyncio.create_task(checker.cek_domain()))
+        schedule.every(30).minutes.do(lambda: asyncio.create_task(kirim_status()))
         
-        # Run immediately
+        # Jalankan segera saat startup
         await checker.cek_domain()
         await kirim_status()
         
         logger.info("Bot started successfully!")
+        logger.info("✅ Domain check: setiap 2 menit")
+        logger.info("✅ Status report: setiap 30 menit")
+        logger.info("✅ Laporan: hanya jika ada yang terblokir")
         
         # Main loop
         while True:
@@ -250,11 +250,14 @@ if __name__ == "__main__":
         # Create domain.txt if not exists
         if not os.path.exists("domain.txt"):
             with open("domain.txt", "w") as f:
-                f.write("# Domain untuk monitoring\n")
+                f.write("# Domain untuk monitoring TrustPositif\n")
+                f.write("# Satu domain per baris\n")
                 f.write("google.com\n")
                 f.write("youtube.com\n")
                 f.write("facebook.com\n")
                 f.write("instagram.com\n")
+                f.write("twitter.com\n")
+            logger.info("File domain.txt created")
         
         asyncio.run(tugas_utama())
     except KeyboardInterrupt:
