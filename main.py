@@ -204,7 +204,7 @@ async def kirim_status():
             f"⏰ Waktu: {waktu}\n"
             f"🔍 Fitur: Auto-check setiap 5 menit\n"
             f"📊 Monitoring: Real-time TrustPositif\n\n"
-            "📋 *Daftar Domain:* https://ceknawalaonline.pro/kaisar/"
+            "📋 *Daftar Domain:* https://ceknawalaonline.pro/grup49/"
         )
         
         await application.bot.send_message(
