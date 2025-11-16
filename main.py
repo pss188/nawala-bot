@@ -210,7 +210,7 @@ async def kirim_status():
             "🤖 *Bot TrustPositif Aktif*\n"
             f"✅ Status: Normal\n"
             f"⏰ {waktu}\n"
-            f"🔍 Auto-check 5 menit"
+            f"🔍 Auto-check 5 menit\n"
             f"📋 Daftar Domain: https://ceknawalaonline.pro/grup49/"
         )
         
