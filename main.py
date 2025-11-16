@@ -36,6 +36,12 @@ class DomainChecker:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
+        self.checking_stats = {
+            "nawala_api": 0,
+            "skiddle_api": 0,
+            "direct_check": 0,
+            "failed_checks": 0
+        }
     
     def extract_domain(self, url):
         """Extract domain from URL like the JavaScript function"""
@@ -85,6 +91,8 @@ class DomainChecker:
     def cek_nawala_api(self, domains):
         """Check domains using NawalaAsia-like API"""
         try:
+            self.checking_stats["nawala_api"] += 1
+            
             # Prepare data like the website
             domains_text = "\n".join(domains)
             data = {
@@ -94,57 +102,94 @@ class DomainChecker:
             
             response = self.session.post(NAWALA_API_URL, data=data, timeout=30)
             if response.status_code == 200:
+                logger.info("✅ NawalaAPI: Berhasil")
                 return response.json()
             else:
-                logger.error(f"API error: {response.status_code}")
+                logger.warning(f"❌ NawalaAPI: Error {response.status_code}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error checking Nawala API: {e}")
+            logger.error(f"❌ NawalaAPI: Gagal - {e}")
             return None
     
-    def cek_domain_alternative(self, domain):
-        """Alternative checking method if API fails"""
+    def cek_skiddle_api(self, domain):
+        """Check using Skiddle API"""
         try:
-            # Try multiple methods
-            check_urls = [
-                f"https://check.skiddle.id/?domains={domain}",
+            self.checking_stats["skiddle_api"] += 1
+            
+            url = f"https://check.skiddle.id/?domains={domain}"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"✅ SkiddleAPI: Berhasil cek {domain}")
+                
+                if domain in data and data[domain].get("blocked", False):
+                    return {"domain": domain, "status": "Blocked", "source": "skiddle"}
+                else:
+                    return {"domain": domain, "status": "Not Blocked", "source": "skiddle"}
+            else:
+                logger.warning(f"❌ SkiddleAPI: Error {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ SkiddleAPI: Gagal - {e}")
+            return None
+    
+    def cek_direct(self, domain):
+        """Direct HTTP checking with pattern analysis"""
+        try:
+            self.checking_stats["direct_check"] += 1
+            
+            test_urls = [
+                f"http://{domain}",
+                f"https://{domain}"
             ]
             
-            for url in check_urls:
+            for url in test_urls:
                 try:
-                    response = self.session.get(url, timeout=10, allow_redirects=True)
+                    response = self.session.get(url, timeout=8, allow_redirects=True)
+                    content = response.text.lower()
                     
-                    if response.status_code == 200:
-                        # For Skiddle API
-                        if "skiddle.id" in url:
-                            data = response.json()
-                            if domain in data and data[domain].get("blocked", False):
-                                return {"domain": domain, "status": "Blocked"}
-                            else:
-                                return {"domain": domain, "status": "Not Blocked"}
+                    # Blocking patterns
+                    blocking_patterns = [
+                        "nawala", "trustpositif", "kominfo", "blokir", "diblokir",
+                        "180.131.144", "180.131.145", "internet positif",
+                        "site is blocked", "akses diblokir"
+                    ]
+                    
+                    # Check if any blocking pattern exists
+                    if any(pattern in content for pattern in blocking_patterns):
+                        logger.info(f"✅ DirectCheck: {domain} → BLOKIR (Pattern Match)")
+                        return {"domain": domain, "status": "Blocked", "source": "direct"}
+                    else:
+                        logger.info(f"✅ DirectCheck: {domain} → AMAN")
+                        return {"domain": domain, "status": "Not Blocked", "source": "direct"}
                         
-                        # Direct check content analysis
-                        content = response.text.lower()
-                        blocking_indicators = [
-                            "nawala", "trustpositif", "kominfo", "blokir",
-                            "180.131.144", "180.131.145"
-                        ]
-                        
-                        if any(indicator in content for indicator in blocking_indicators):
-                            return {"domain": domain, "status": "Blocked"}
-                            
-                        return {"domain": domain, "status": "Not Blocked"}
-                        
-                except Exception as e:
-                    logger.warning(f"Check failed for {url}: {e}")
+                except requests.exceptions.RequestException as e:
                     continue
             
-            return {"domain": domain, "status": "Unknown"}
+            # If all checks failed
+            self.checking_stats["failed_checks"] += 1
+            logger.warning(f"❌ DirectCheck: Semua metode gagal untuk {domain}")
+            return {"domain": domain, "status": "Unknown", "source": "failed"}
             
         except Exception as e:
-            logger.error(f"Error in alternative check for {domain}: {e}")
-            return {"domain": domain, "status": "Error"}
+            logger.error(f"❌ DirectCheck: Error - {e}")
+            return {"domain": domain, "status": "Error", "source": "error"}
+    
+    def get_checking_stats(self):
+        """Get statistics of checking methods used"""
+        return self.checking_stats.copy()
+    
+    def reset_stats(self):
+        """Reset statistics for new checking session"""
+        self.checking_stats = {
+            "nawala_api": 0,
+            "skiddle_api": 0,
+            "direct_check": 0,
+            "failed_checks": 0
+        }
     
     async def cek_domain(self):
         """Main domain checking function"""
@@ -153,46 +198,107 @@ class DomainChecker:
             logger.warning("Tidak ada domain yang valid untuk dicek")
             return
         
-        logger.info(f"Memulai pengecekan {len(domains)} domain...")
+        # Reset stats for new session
+        self.reset_stats()
         
-        # Try Nawala API first (sync)
-        api_result = self.cek_nawala_api(domains)
+        logger.info(f"🔄 Memulai pengecekan {len(domains)} domain...")
         
         blocked_domains = []
+        checking_details = []  # Untuk menyimpan detail sumber pengecekan
+        
+        # Try Nawala API first for bulk checking
+        api_result = self.cek_nawala_api(domains)
+        
         if api_result and api_result.get("status") == "success":
             # Process API response
             for item in api_result.get("data", []):
-                if item.get("status") == "Blocked":
-                    blocked_domains.append(item.get("domain"))
-                    logger.info(f"Domain diblokir (API): {item.get('domain')}")
+                domain = item.get("domain")
+                status = item.get("status")
+                if status == "Blocked":
+                    blocked_domains.append(domain)
+                    checking_details.append(f"• `{domain}` - 🔧 *NawalaAPI*")
+                    logger.info(f"🚫 {domain} → BLOKIR (NawalaAPI)")
         else:
-            # Fallback to alternative checking
-            logger.info("Menggunakan metode pengecekan alternatif...")
+            # Fallback to individual checking
+            logger.info("🔄 Menggunakan metode pengecekan individual...")
+            
             for domain in domains:
-                result = self.cek_domain_alternative(domain)
-                if result.get("status") == "Blocked":
-                    blocked_domains.append(result.get("domain"))
-                    logger.info(f"Domain diblokir (Alternative): {result.get('domain')}")
+                # Try Skiddle API first
+                result = self.cek_skiddle_api(domain)
+                
+                if not result:
+                    # Fallback to direct checking
+                    result = self.cek_direct(domain)
+                
+                if result and result.get("status") == "Blocked":
+                    blocked_domains.append(domain)
+                    source = result.get("source", "unknown")
+                    
+                    if source == "skiddle":
+                        checking_details.append(f"• `{domain}` - 🎯 *SkiddleAPI*")
+                        logger.info(f"🚫 {domain} → BLOKIR (SkiddleAPI)")
+                    elif source == "direct":
+                        checking_details.append(f"• `{domain}` - 🌐 *DirectCheck*")
+                        logger.info(f"🚫 {domain} → BLOKIR (DirectCheck)")
+                    else:
+                        checking_details.append(f"• `{domain}` - ❓ *Unknown*")
+                        logger.info(f"🚫 {domain} → BLOKIR (Unknown)")
         
-        # Send notification if blocked domains found
-        if blocked_domains:
-            message = "🚫 *Domain Terblokir TrustPositif:*\n\n"
-            for domain in blocked_domains:
-                message += f"• `{domain}`\n"
+        # Send notification with detailed report
+        stats = self.get_checking_stats()
+        await self.kirim_laporan(blocked_domains, checking_details, stats, len(domains))
+    
+    async def kirim_laporan(self, blocked_domains, checking_details, stats, total_domains):
+        """Send detailed report to Telegram"""
+        try:
+            waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
             
-            message += f"\n⏰ {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}"
+            if blocked_domains:
+                # Detailed report with sources
+                message = "🚫 *LAPORAN BLOKIR TRUSTPOSITIF*\n\n"
+                message += f"📊 **Statistik Pengecekan:**\n"
+                message += f"• Total Domain: `{total_domains}`\n"
+                message += f"• Terblokir: `{len(blocked_domains)}`\n"
+                message += f"• Aman: `{total_domains - len(blocked_domains)}`\n\n"
+                
+                message += "🔧 **Metode Pengecekan:**\n"
+                message += f"• NawalaAPI: `{stats['nawala_api']}`x\n"
+                message += f"• SkiddleAPI: `{stats['skiddle_api']}`x\n"
+                message += f"• DirectCheck: `{stats['direct_check']}`x\n"
+                message += f"• Gagal: `{stats['failed_checks']}`x\n\n"
+                
+                message += "📋 **Domain Terblokir:**\n"
+                for detail in checking_details:
+                    message += f"{detail}\n"
+                
+                message += f"\n⏰ *Waktu:* {waktu}"
+                
+            else:
+                # No blocking report
+                message = "✅ *LAPORAN MONITORING TRUSTPOSITIF*\n\n"
+                message += f"📊 **Statistik Pengecekan:**\n"
+                message += f"• Total Domain: `{total_domains}`\n"
+                message += f"• Terblokir: `0` (Semua Aman) ✅\n\n"
+                
+                message += "🔧 **Metode Pengecekan:**\n"
+                message += f"• NawalaAPI: `{stats['nawala_api']}`x\n"
+                message += f"• SkiddleAPI: `{stats['skiddle_api']}`x\n"
+                message += f"• DirectCheck: `{stats['direct_check']}`x\n"
+                message += f"• Gagal: `{stats['failed_checks']}`x\n\n"
+                
+                message += "🎉 *Semua domain dapat diakses dengan normal!*\n"
+                message += f"\n⏰ *Waktu:* {waktu}"
             
-            try:
-                await application.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=message,
-                    parse_mode="Markdown"
-                )
-                logger.info(f"Notifikasi terkirim untuk {len(blocked_domains)} domain terblokir")
-            except Exception as e:
-                logger.error(f"Gagal mengirim notifikasi: {e}")
-        else:
-            logger.info("Tidak ada domain yang terblokir")
+            await application.bot.send_message(
+                chat_id=CHAT_ID,
+                text=message,
+                parse_mode="Markdown"
+            )
+            
+            logger.info(f"📨 Laporan terkirim: {len(blocked_domains)} domain terblokir")
+            
+        except Exception as e:
+            logger.error(f"❌ Gagal mengirim laporan: {e}")
 
 async def kirim_status():
     """Send bot status"""
@@ -203,7 +309,8 @@ async def kirim_status():
             f"✅ Status: Berjalan normal\n"
             f"⏰ Waktu: {waktu}\n"
             f"🔍 Fitur: Auto-check setiap 5 menit\n"
-            f"📊 Monitoring: Real-time TrustPositif\n\n"
+            f"📊 Monitoring: Real-time TrustPositif\n"
+            f"🔧 Sumber: NawalaAPI + SkiddleAPI + DirectCheck\n\n"
             "📋 *Daftar Domain:* https://ceknawalaonline.pro/grup49/"
         )
         
@@ -212,9 +319,9 @@ async def kirim_status():
             text=message,
             parse_mode="Markdown"
         )
-        logger.info("Status bot terkirim")
+        logger.info("✅ Status bot terkirim")
     except Exception as e:
-        logger.error(f"Gagal kirim status: {e}")
+        logger.error(f"❌ Gagal kirim status: {e}")
 
 async def tugas_utama():
     """Main task scheduler"""
@@ -229,7 +336,7 @@ async def tugas_utama():
         await checker.cek_domain()
         await kirim_status()
         
-        logger.info("Bot TrustPositif Checker berhasil dijalankan!")
+        logger.info("🚀 Bot TrustPositif Checker berhasil dijalankan!")
         
         # Main loop
         while True:
@@ -237,7 +344,7 @@ async def tugas_utama():
             await asyncio.sleep(1)
             
     except Exception as e:
-        logger.error(f"Error dalam tugas utama: {e}")
+        logger.error(f"❌ Error dalam tugas utama: {e}")
 
 if __name__ == "__main__":
     try:
@@ -246,16 +353,17 @@ if __name__ == "__main__":
             with open("domain.txt", "w") as f:
                 f.write("# Masukkan domain yang ingin dipantau\n")
                 f.write("# Satu domain per baris\n")
-                f.write("example.com\n")
                 f.write("google.com\n")
                 f.write("youtube.com\n")
                 f.write("facebook.com\n")
-            logger.info("File domain.txt created with examples")
+                f.write("instagram.com\n")
+                f.write("twitter.com\n")
+            logger.info("📁 File domain.txt created with examples")
         
         asyncio.run(tugas_utama())
     except KeyboardInterrupt:
-        logger.info("Bot dihentikan oleh pengguna")
+        logger.info("⏹️ Bot dihentikan oleh pengguna")
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        logger.error(f"❌ Bot error: {e}")
     finally:
-        logger.info("Bot TrustPositif Checker berhenti")
+        logger.info("🛑 Bot TrustPositif Checker berhenti")
