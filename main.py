@@ -1,4 +1,3 @@
-# skiddle_checker_proxy.py
 import os
 import sys
 import asyncio
@@ -6,12 +5,12 @@ import requests
 import schedule
 import time
 import random
+import logging
 from datetime import datetime
 from telegram import Bot
 from telegram.ext import Application
 
 # Setup logging
-import logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -29,203 +28,206 @@ if not TOKEN or not CHAT_ID:
 # Bot setup
 application = Application.builder().token(TOKEN).build()
 
-# Cambodia Proxy Pool
-CAMBODIA_PROXIES = [
-    "http://202.178.125.136:8080",
-    "http://203.171.252.7:8080", 
-    "http://175.100.34.177:8080",
-    "http://45.201.208.192:8080",
-    "http://203.95.196.73:8080",
-    "http://103.9.190.130:8080",
-    "http://203.95.197.153:8080",
-    "http://175.100.35.103:8080",
-    "http://36.37.147.34:8080",
-    "http://110.235.250.77:8080",
-    "http://103.73.164.190:32650",
-    "http://36.37.251.137:8080",
-    "http://110.74.215.170:8080",
-    "http://203.189.153.19:8083",
-    "http://203.95.196.40:8080",
-    "http://203.95.198.162:8080",
-    "http://36.37.180.40:8080",
-    "http://203.95.198.180:8080",
-    "http://5.28.35.226:9812",
-    "http://119.15.86.30:8080",
-    "http://50.114.33.244:8080",
-    "http://203.95.196.6:8080",
-    "http://103.118.44.218:8080",
-    "http://116.212.149.218:8080",
-    "http://50.114.33.183:8080",
-    "http://203.95.198.192:8080",
-    "http://175.100.103.170:55443",
-    "http://103.118.44.205:8080",
-    "http://203.176.134.41:8080",
-    "socks5://103.12.161.222:1080"
+# PROXY PREMIUM SAJA
+PROXY_LIST = [
+    # Premium Proxy HTTP dengan auth
+    {
+        'http': 'http://pulsaslot1888:b3Kft6IMwG@95.135.92.164:59100',
+        'https': 'http://pulsaslot1888:b3Kft6IMwG@95.135.92.164:59100',
+        'name': 'premium_http',
+        'type': 'premium'
+    },
+    # Premium Proxy SOCKS5 dengan auth
+    {
+        'socks5': 'socks5://pulsaslot1888:b3Kft6IMwG@95.135.92.164:59101',
+        'name': 'premium_socks5',
+        'type': 'premium'
+    }
 ]
 
-# Working proxies cache
+# Cache untuk proxy yang bekerja
 working_proxies = []
 proxy_last_update = 0
 
-def test_proxy(proxy_url):
-    """Test if a proxy is working"""
-    try:
-        proxies = {
-            'http': proxy_url,
-            'https': proxy_url.replace('http://', 'https://') if proxy_url.startswith('http://') else proxy_url
-        }
+def create_request_session(proxy_info):
+    """Create requests session dengan proxy configuration"""
+    session = requests.Session()
+    
+    # Headers tetap untuk semua request
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    })
+    
+    # Setup proxy
+    if 'http' in proxy_info or 'https' in proxy_info:
+        # HTTP/HTTPS proxy
+        proxy_config = {}
+        if 'http' in proxy_info:
+            proxy_config['http'] = proxy_info['http']
+        if 'https' in proxy_info:
+            proxy_config['https'] = proxy_info['https']
         
-        # Test with a simple request
-        response = requests.get(
+        session.proxies.update(proxy_config)
+        session.trust_env = False  # Ignore system proxy
+    
+    return session
+
+def test_proxy(proxy_info):
+    """Test jika proxy bekerja"""
+    try:
+        session = create_request_session(proxy_info)
+        
+        # Test dengan simple request
+        response = session.get(
             'http://httpbin.org/ip',
-            proxies=proxies,
-            timeout=10,
-            headers={'User-Agent': 'Mozilla/5.0'}
+            timeout=10
         )
         
         if response.status_code == 200:
             data = response.json()
-            logger.info(f"✅ Proxy works: {proxy_url} -> IP: {data.get('origin')}")
+            logger.info(f"✅ Proxy {proxy_info['name']} bekerja. IP: {data.get('origin', 'Unknown')}")
             return True
+            
     except Exception as e:
-        logger.debug(f"Proxy {proxy_url} failed: {e}")
+        logger.warning(f"❌ Proxy {proxy_info['name']} gagal: {str(e)[:100]}")
     
     return False
 
 def get_working_proxies():
-    """Get list of working proxies with caching"""
+    """Dapatkan list proxy yang bekerja"""
     global working_proxies, proxy_last_update
     
-    # Return cached if recent (1 hour)
+    # Cache selama 30 menit
     current_time = time.time()
-    if working_proxies and (current_time - proxy_last_update) < 3600:
+    if working_proxies and (current_time - proxy_last_update) < 1800:
         return working_proxies
     
-    logger.info("Testing proxy pool...")
+    logger.info("🔍 Testing proxy premium...")
     working_proxies = []
     
-    # Test all proxies
-    for proxy in CAMBODIA_PROXIES:
+    for proxy in PROXY_LIST:
         if test_proxy(proxy):
             working_proxies.append(proxy)
-        
-        # Small delay between tests
-        time.sleep(0.5)
     
     proxy_last_update = current_time
-    logger.info(f"Found {len(working_proxies)} working proxies")
     
-    # If no proxies work, use all as fallback
-    if not working_proxies:
-        logger.warning("No proxies working, using all as fallback")
-        working_proxies = CAMBODIA_PROXIES.copy()
+    if working_proxies:
+        logger.info(f"✅ Found {len(working_proxies)} working proxies")
+    else:
+        logger.error("❌ Tidak ada proxy yang bekerja!")
     
     return working_proxies
 
-def check_domain_with_proxy(domain, proxy_url=None):
-    """Check domain using a proxy"""
-    proxies = None
-    
-    if proxy_url:
-        proxies = {
-            'http': proxy_url,
-            'https': proxy_url.replace('http://', 'https://') if proxy_url.startswith('http://') else proxy_url
-        }
-    
+def check_domain_skiddle(domain, proxy_info):
+    """Cek domain di skiddle.id menggunakan proxy"""
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://check.skiddle.id/',
-            'Origin': 'https://check.skiddle.id'
-        }
+        session = create_request_session(proxy_info)
         
-        response = requests.get(
+        # Tambahkan headers khusus untuk skiddle.id
+        skiddle_headers = {
+            'Referer': 'https://check.skiddle.id/',
+            'Origin': 'https://check.skiddle.id',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
+        }
+        session.headers.update(skiddle_headers)
+        
+        response = session.get(
             f'https://check.skiddle.id/?domains={domain}',
-            proxies=proxies,
-            headers=headers,
-            timeout=15
+            timeout=20
         )
         
         if response.status_code == 200:
-            data = response.json()
-            return {
-                'blocked': data.get(domain, {}).get('blocked', False),
-                'data': data,
-                'success': True,
-                'status': 'success'
-            }
-        elif response.status_code in [403, 429]:
-            return {
-                'blocked': None,
-                'error': f'Access denied: {response.status_code}',
-                'success': False,
-                'status': 'blocked'
-            }
+            try:
+                data = response.json()
+                return {
+                    'success': True,
+                    'blocked': data.get(domain, {}).get('blocked', False),
+                    'data': data.get(domain, {}),
+                    'raw_data': data,
+                    'status_code': response.status_code,
+                    'proxy_used': proxy_info['name']
+                }
+            except ValueError:
+                # Response bukan JSON
+                return {
+                    'success': False,
+                    'error': 'Invalid JSON response',
+                    'status_code': response.status_code,
+                    'proxy_used': proxy_info['name']
+                }
         else:
             return {
-                'blocked': None,
-                'error': f'HTTP {response.status_code}',
                 'success': False,
-                'status': 'error'
+                'error': f'HTTP {response.status_code}',
+                'status_code': response.status_code,
+                'proxy_used': proxy_info['name']
             }
             
-    except requests.exceptions.ProxyError as e:
-        return {
-            'blocked': None,
-            'error': f'Proxy error: {str(e)}',
-            'success': False,
-            'status': 'proxy_error'
-        }
     except requests.exceptions.Timeout:
         return {
-            'blocked': None,
-            'error': 'Request timeout',
             'success': False,
-            'status': 'timeout'
+            'error': 'Request timeout',
+            'proxy_used': proxy_info['name']
         }
     except Exception as e:
         return {
-            'blocked': None,
-            'error': str(e),
             'success': False,
-            'status': 'exception'
+            'error': str(e),
+            'proxy_used': proxy_info['name']
         }
 
 async def kirim_status():
+    """Kirim status bot ke Telegram"""
     try:
         waktu = time.strftime("%d-%m-%Y %H:%M:%S")
-        proxy_count = len(get_working_proxies())
+        proxies = get_working_proxies()
+        
+        status_text = f"🤖 *Bot Aktif*\n"
+        status_text += f"Waktu: {waktu}\n"
+        status_text += f"Proxy aktif: {len(proxies)}/{len(PROXY_LIST)}\n"
+        
+        for proxy in proxies:
+            status_text += f"• {proxy['name']}\n"
         
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🤖 *Bot Aktif*\nWaktu: {waktu}\nProxy aktif: {proxy_count}/{len(CAMBODIA_PROXIES)}",
+            text=status_text,
             parse_mode="Markdown"
         )
-        logger.info("Status bot terkirim")
+        logger.info("✅ Status bot terkirim")
+        
     except Exception as e:
-        logger.error(f"Gagal kirim status: {e}")
+        logger.error(f"❌ Gagal kirim status: {e}")
 
 def baca_domain():
+    """Baca domain dari file"""
     try:
         with open("domain.txt", "r") as f:
-            return [line.strip() for line in f if line.strip()]
+            domains = [line.strip() for line in f if line.strip()]
+            logger.info(f"📖 Membaca {len(domains)} domain dari file")
+            return domains
     except Exception as e:
-        logger.error(f"Error baca domain: {e}")
+        logger.error(f"❌ Error baca domain: {e}")
         return []
 
 async def cek_domain():
+    """Cek semua domain"""
     domains = baca_domain()
     if not domains:
-        logger.info("Tidak ada domain untuk dicek")
+        logger.info("ℹ️ Tidak ada domain untuk dicek")
         return
     
-    # Get working proxies
     proxies = get_working_proxies()
-    
     if not proxies:
-        logger.error("Tidak ada proxy yang bekerja!")
+        logger.error("❌ Tidak ada proxy yang bekerja!")
         await application.bot.send_message(
             chat_id=CHAT_ID,
             text="❌ *Tidak ada proxy yang bekerja!*",
@@ -233,129 +235,127 @@ async def cek_domain():
         )
         return
     
-    hasil = []
+    hasil_blokir = []
     total_domain = len(domains)
     berhasil_dicek = 0
     
-    logger.info(f"Memulai pengecekan {total_domain} domain dengan {len(proxies)} proxy...")
+    logger.info(f"🔍 Memulai pengecekan {total_domain} domain...")
     
     for domain in domains:
-        max_retries = 3
+        logger.info(f"🔍 Checking: {domain}")
+        max_retries = 2
         checked = False
         
         for attempt in range(max_retries):
-            # Pilih proxy acak
-            proxy = random.choice(proxies)
+            # Pilih proxy secara bergantian
+            proxy = proxies[attempt % len(proxies)]
             
-            logger.info(f"Attempt {attempt+1}: Cek {domain} dengan proxy {proxy}")
-            
-            result = check_domain_with_proxy(domain, proxy)
+            logger.info(f"   Attempt {attempt+1} dengan {proxy['name']}")
+            result = check_domain_skiddle(domain, proxy)
             
             if result['success']:
                 berhasil_dicek += 1
                 checked = True
                 
                 if result['blocked']:
-                    hasil.append(f"🚫 *{domain}* nawala!")
-                    logger.info(f"{domain}: TERBLOKIR (via proxy {proxy})")
+                    hasil_blokir.append(f"🚫 *{domain}* nawala!")
+                    logger.info(f"   ✅ {domain}: TERBLOKIR (via {proxy['name']})")
                 else:
-                    logger.info(f"{domain}: AMAN (via proxy {proxy})")
+                    logger.info(f"   ✅ {domain}: AMAN (via {proxy['name']})")
                 
-                break  # Success, keluar dari retry loop
-                
-            elif result['status'] == 'proxy_error':
-                # Proxy mungkin mati, coba proxy lain
-                logger.warning(f"Proxy {proxy} error, mencoba proxy lain...")
-                if proxy in proxies:
-                    proxies.remove(proxy)
-                if not proxies:
-                    logger.error("Semua proxy error!")
-                    break
-                continue
-                
+                break  # Berhasil, keluar dari retry
             else:
-                logger.warning(f"Attempt {attempt+1} gagal: {result['error']}")
-                await asyncio.sleep(2)  # Tunggu sebelum retry
+                logger.warning(f"   ❌ Attempt {attempt+1} gagal: {result['error']}")
+                await asyncio.sleep(1)  # Delay sebelum retry
         
         if not checked:
-            logger.error(f"Gagal cek {domain} setelah {max_retries} percobaan")
+            logger.error(f"   ❌ Gagal cek {domain} setelah {max_retries} percobaan")
     
-    # Kirim hasil
-    if hasil:
-        message = "🔍 *Hasil Pengecekan Domain:*\n\n" + "\n".join(hasil)
-        message += f"\n\n📊 Statistik:"
-        message += f"\n• Total domain: {total_domain}"
-        message += f"\n• Berhasil dicek: {berhasil_dicek}"
-        message += f"\n• Terblokir: {len(hasil)}"
-        message += f"\n• Proxy aktif: {len(get_working_proxies())}"
-        
-        await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="Markdown"
-        )
-        logger.info(f"Laporan terkirim: {len(hasil)} domain terblokir")
-    
+    # Kirim laporan ke Telegram
+    if hasil_blokir:
+        message = "🚨 *DOMAIN TERBLOKIR* 🚨\n\n"
+        message += "\n".join(hasil_blokir)
+        message += f"\n\n📊 *Statistik:*\n"
+        message += f"• Total domain: {total_domain}\n"
+        message += f"• Berhasil dicek: {berhasil_dicek}\n"
+        message += f"• Terblokir: {len(hasil_blokir)}"
     elif berhasil_dicek > 0:
-        # Semua aman
-        message = f"✅ Semua *{berhasil_dicek}* domain aman!"
-        message += f"\n\n📊 Statistik:"
-        message += f"\n• Total domain: {total_domain}"
-        message += f"\n• Proxy aktif: {len(get_working_proxies())}"
-        
+        message = "✅ *SEMUA DOMAIN AMAN* ✅\n\n"
+        message += f"📊 *Statistik:*\n"
+        message += f"• Total domain: {total_domain}\n"
+        message += f"• Berhasil dicek: {berhasil_dicek}\n"
+        message += f"• Terblokir: 0"
+    else:
+        message = "⚠️ *GAGAL MENGECEK DOMAIN* ⚠️\n\n"
+        message += f"Tidak ada domain yang berhasil dicek.\n"
+        message += f"Total domain: {total_domain}"
+    
+    try:
         await application.bot.send_message(
             chat_id=CHAT_ID,
             text=message,
             parse_mode="Markdown"
         )
-        logger.info(f"Semua {berhasil_dicek} domain aman")
-    
-    else:
-        logger.warning("Tidak ada domain yang berhasil dicek")
-        await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text="⚠️ *Gagal memeriksa semua domain!*\nProxy mungkin tidak bekerja.",
-            parse_mode="Markdown"
-        )
+        logger.info(f"📤 Laporan terkirim: {len(hasil_blokir)} domain terblokir")
+    except Exception as e:
+        logger.error(f"❌ Gagal kirim laporan: {e}")
 
 async def tugas_utama():
-    # Test proxies saat start
+    """Main bot task"""
+    # Test proxy saat start
     proxies = get_working_proxies()
     
     if proxies:
-        logger.info(f"✅ {len(proxies)} proxy aktif!")
+        logger.info(f"✅ Bot siap dengan {len(proxies)} proxy premium!")
+        
+        startup_msg = "🚀 *Bot Skiddle Checker Aktif!*\n\n"
+        startup_msg += f"✅ {len(proxies)} proxy premium siap digunakan:\n"
+        for proxy in proxies:
+            startup_msg += f"• {proxy['name']}\n"
+        startup_msg += f"\nBot akan mengecek domain setiap 5 menit."
+        
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"✅ *Proxy aktif!*\n{len(proxies)} proxy Kamboja siap digunakan.",
+            text=startup_msg,
             parse_mode="Markdown"
         )
     else:
         logger.error("❌ Tidak ada proxy yang bekerja!")
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text="❌ *Tidak ada proxy yang bekerja!*\nBot tidak dapat memantau domain.",
+            text="❌ *Bot Gagal Start!*\nTidak ada proxy premium yang bekerja.",
             parse_mode="Markdown"
         )
+        return
     
     # Jadwalkan tugas
     schedule.every(5).minutes.do(lambda: asyncio.create_task(cek_domain()))
     schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
-    schedule.every(2).hours.do(lambda: get_working_proxies())  # Update proxy list
+    schedule.every(30).minutes.do(get_working_proxies)  # Update proxy list
     
     # Jalankan segera
     await cek_domain()
     await kirim_status()
-
-    # Loop utama
+    
+    # Main loop
+    logger.info("🔄 Bot berjalan...")
     while True:
         schedule.run_pending()
         await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    # Install package jika belum: pip install requests pysocks
+    # Check for PySocks jika butuh SOCKS5
+    try:
+        import socks
+        logger.info("✅ PySocks terinstall, SOCKS5 proxy siap digunakan")
+    except ImportError:
+        logger.warning("⚠️ PySocks tidak terinstall. SOCKS5 proxy tidak akan bekerja.")
+        logger.info("   Install dengan: pip install pysocks")
+    
     try:
         asyncio.run(tugas_utama())
     except KeyboardInterrupt:
-        logger.info("Bot dihentikan oleh pengguna")
+        logger.info("👋 Bot dihentikan oleh pengguna")
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        logger.error(f"💥 Bot error: {e}")
+        sys.exit(1)
