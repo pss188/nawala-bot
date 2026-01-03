@@ -3,6 +3,7 @@ import sys
 import time
 import schedule
 import requests
+import asyncio
 from telegram import Bot
 from telegram.ext import Application
 import logging
@@ -73,6 +74,16 @@ def baca_domain():
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#'):
+                    # Hapus http:// atau https:// jika ada
+                    if line.startswith('http://'):
+                        line = line[7:]
+                    elif line.startswith('https://'):
+                        line = line[8:]
+                    # Hapus www. jika ada
+                    if line.startswith('www.'):
+                        line = line[4:]
+                    # Hapus trailing slash
+                    line = line.rstrip('/')
                     domains.append(line)
             return domains
     except Exception as e:
@@ -80,7 +91,7 @@ def baca_domain():
         return []
 
 def cek_domain_sync():
-    """Fungsi synchronous untuk cek domain"""
+    """Fungsi synchronous untuk cek domain di nawala.in"""
     try:
         domains = baca_domain()
         if not domains:
@@ -93,24 +104,61 @@ def cek_domain_sync():
             try:
                 logger.info(f"Memeriksa domain: {domain}")
                 
-                # Gunakan proxy untuk request
-                response = requests.get(
-                    f'https://check.skiddle.id/?domains={domain}',
-                    proxies=proxies,
-                    timeout=15
-                )
+                # Cek di nawala.in menggunakan DNSBL API
+                # Nawala menggunakan format: http://nawala.in/dnsbl.php?ip=DOMAIN
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    blocked = data.get(domain, {}).get("blocked", False)
+                # Format domain untuk DNSBL (reverse format)
+                # Contoh: google.com menjadi com.google
+                parts = domain.split('.')
+                if len(parts) >= 2:
+                    reversed_domain = '.'.join(reversed(parts))
+                    dnsbl_domain = f"{reversed_domain}.dnsbl.nawala.id"
                     
-                    if blocked:
-                        hasil.append(f"🚫 *{domain}* terblokir!")
-                        logger.warning(f"Domain terblokir: {domain}")
+                    # Cek melalui DNS lookup atau HTTP API
+                    # Menggunakan metode DNS query melalui 8.8.8.8
+                    query_url = f"https://dns.google/resolve?name={dnsbl_domain}&type=A"
+                    
+                    # Gunakan proxy untuk request
+                    response = requests.get(
+                        query_url,
+                        proxies=proxies,
+                        timeout=15
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        # Jika ada Answer, berarti terblokir
+                        if 'Answer' in data and len(data['Answer']) > 0:
+                            # Ambil alamat IP hasil block (biasanya 127.0.0.1 atau 127.0.0.2)
+                            blocked_ip = data['Answer'][0]['data']
+                            hasil.append(f"🚫 *{domain}* terblokir (IP: {blocked_ip})")
+                            logger.warning(f"Domain terblokir: {domain} - {blocked_ip}")
+                        else:
+                            # Coba metode alternatif: cek langsung ke API nawala
+                            try:
+                                alt_response = requests.get(
+                                    f"http://nawala.in/dnsbl.php?ip={domain}",
+                                    proxies=proxies,
+                                    timeout=10
+                                )
+                                
+                                if alt_response.status_code == 200:
+                                    content = alt_response.text
+                                    if "BLOCKED" in content.upper() or "YES" in content.upper():
+                                        hasil.append(f"🚫 *{domain}* terblokir di Nawala")
+                                        logger.warning(f"Domain terblokir (alternatif): {domain}")
+                                    else:
+                                        logger.info(f"Domain aman: {domain}")
+                                else:
+                                    logger.info(f"Domain aman: {domain} (tidak ada di DNSBL)")
+                            except:
+                                logger.info(f"Domain aman: {domain}")
                     else:
-                        logger.info(f"Domain aman: {domain}")
+                        logger.error(f"DNS Error untuk {domain}")
+                        
                 else:
-                    logger.error(f"HTTP Error {response.status_code} untuk {domain}")
+                    logger.warning(f"Format domain tidak valid: {domain}")
                     
             except requests.exceptions.Timeout:
                 logger.error(f"Timeout untuk domain {domain}")
@@ -123,7 +171,8 @@ def cek_domain_sync():
             # Kirim hasil via Telegram (async)
             asyncio.create_task(kirim_hasil_domain(hasil, len(domains)))
         else:
-            logger.info("Semua domain aman")
+            # Kirim laporan kosong jika semua aman
+            asyncio.create_task(kirim_hasil_aman(len(domains)))
             
     except Exception as e:
         logger.error(f"Error dalam cek_domain_sync: {e}")
@@ -133,7 +182,7 @@ async def kirim_hasil_domain(hasil_list, total_domain):
     try:
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🔔 *LAPORAN DOMAIN*\n\n" + 
+            text=f"🔔 *LAPORAN DOMAIN NAWALA.IN*\n\n" + 
                  "\n".join(hasil_list) + 
                  f"\n\n📊 Total: {len(hasil_list)} dari {total_domain} domain terblokir",
             parse_mode="Markdown"
@@ -142,9 +191,26 @@ async def kirim_hasil_domain(hasil_list, total_domain):
     except Exception as e:
         logger.error(f"Gagal kirim laporan: {e}")
 
+async def kirim_hasil_aman(total_domain):
+    """Kirim laporan jika semua domain aman"""
+    try:
+        waktu = time.strftime("%d-%m-%Y %H:%M:%S")
+        await application.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"✅ *LAPORAN DOMAIN NAWALA.IN*\n\n"
+                 f"Semua domain aman!\n"
+                 f"📍 Total domain: {total_domain}\n"
+                 f"⏰ {waktu}",
+            parse_mode="Markdown"
+        )
+        logger.info(f"Semua {total_domain} domain aman")
+    except Exception as e:
+        logger.error(f"Gagal kirim laporan aman: {e}")
+
 async def tugas_utama():
     logger.info("🚀 Memulai bot monitoring domain...")
     logger.info(f"📍 Proxy: {PROXY_HOST}:{PROXY_PORT_HTTP} (HTTP)")
+    logger.info("📍 Target: nawala.in DNSBL")
     
     # Jadwalkan tugas
     schedule.every(1).minutes.do(cek_domain_sync)
@@ -190,7 +256,6 @@ if __name__ == "__main__":
                 logger.error(f"Gagal install {package}: {e}")
     
     try:
-        import asyncio
         asyncio.run(tugas_utama())
     except KeyboardInterrupt:
         logger.info("Bot berhenti")
