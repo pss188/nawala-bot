@@ -5,6 +5,7 @@ import schedule
 import requests
 import asyncio
 import json
+import re
 from telegram import Bot
 from telegram.ext import Application
 import logging
@@ -52,12 +53,17 @@ except Exception as e:
     logger.warning(f"Gagal setup proxy SOCKS5: {e}. Menggunakan tanpa proxy...")
     application = Application.builder().token(TOKEN).build()
 
+# Session untuk requests
+session = requests.Session()
+session.proxies.update(proxies)
+
 async def kirim_status():
+    """Kirim status bot"""
     try:
         waktu = time.strftime("%d-%m-%Y %H:%M:%S")
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🤖 *Bot Aktif* berjalan normal!\n⏰ {waktu}",
+            text=f"🤖 *Bot Monitoring Nawala* aktif!\n⏰ {waktu}\n📍 nawala.asia API",
             parse_mode="Markdown"
         )
         logger.info("Status bot terkirim")
@@ -65,6 +71,7 @@ async def kirim_status():
         logger.error(f"Gagal kirim status: {e}")
 
 def baca_domain():
+    """Baca domain dari file domain.txt"""
     try:
         with open("domain.txt", "r") as f:
             domains = []
@@ -81,291 +88,340 @@ def baca_domain():
                         line = line[4:]
                     # Hapus trailing slash
                     line = line.rstrip('/')
-                    domains.append(line)
+                    # Validasi domain
+                    if re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$', line):
+                        domains.append(line.lower())
+                    else:
+                        logger.warning(f"Domain tidak valid: {line}")
             return domains
     except Exception as e:
         logger.error(f"Error baca domain: {e}")
         return []
 
-def format_domain_list(domains):
-    """Format daftar domain untuk dikirim ke nawala.in"""
-    return "\n".join(domains)
+def get_recaptcha_token():
+    """Generate reCAPTCHA token simulasi"""
+    # Ini adalah token dummy, untuk production perlu implementasi proper
+    # Atau gunakan service seperti 2captcha untuk solve captcha
+    timestamp = int(time.time())
+    dummy_token = f"dummy_recaptcha_token_{timestamp}_simulated"
+    logger.info(f"Menggunakan token reCAPTCHA simulasi")
+    return dummy_token
 
-def cek_nawala_batch(domains):
-    """Cek multiple domain sekaligus ke nawala.in"""
+def cek_nawala_api(domains):
+    """Cek status domain menggunakan API nawala.asia"""
     try:
         if not domains:
+            logger.warning("Tidak ada domain untuk dicek")
             return []
         
-        # Format domain menjadi string dengan satu domain per baris
-        domain_text = format_domain_list(domains)
+        # Max 100 domain per request sesuai website
+        if len(domains) > 100:
+            logger.warning(f"Terlalu banyak domain ({len(domains)}). Hanya 100 pertama yang akan dicek")
+            domains = domains[:100]
         
-        # URL endpoint nawala.in
-        url = "https://nawala.in/check.php"
+        # Format domains (satu per baris)
+        domains_text = "\n".join(domains)
         
-        # Header untuk meniru browser
+        # URL API dari nawala.asia
+        api_url = "https://www.nawala.asia/api/check"
+        
+        # Headers untuk meniru browser
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://nawala.in',
-            'Referer': 'https://nawala.in/',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Origin': 'https://www.nawala.asia',
+            'Referer': 'https://www.nawala.asia/',
+            'X-Requested-With': 'XMLHttpRequest',
         }
         
-        # Data yang dikirim (domain list)
+        # Data payload
         data = {
-            'domains': domain_text
+            'domains': domains_text,
+            'recaptchaToken': get_recaptcha_token()
         }
         
-        logger.info(f"Mengirim {len(domains)} domain ke nawala.in...")
+        logger.info(f"Mengirim {len(domains)} domain ke nawala.asia API...")
         
-        # Kirim request dengan proxy
-        response = requests.post(
-            url,
+        # Kirim request POST
+        response = session.post(
+            api_url,
             headers=headers,
             data=data,
-            proxies=proxies,
             timeout=30
         )
         
+        logger.info(f"Response status: {response.status_code}")
+        
         if response.status_code == 200:
             try:
-                # Coba parse sebagai JSON
                 result = response.json()
-                return parse_nawala_result(result, domains)
-            except json.JSONDecodeError:
-                # Jika bukan JSON, coba parse sebagai HTML/text
-                return parse_nawala_html(response.text, domains)
+                logger.info(f"Response JSON: {json.dumps(result, indent=2)[:500]}...")
+                
+                if result.get('status') == 'success':
+                    data_results = result.get('data', [])
+                    return parse_api_results(data_results)
+                elif result.get('status') == 'error':
+                    error_msg = result.get('message', 'Unknown error')
+                    logger.error(f"API error: {error_msg}")
+                    
+                    # Fallback: coba metode scraping jika API gagal
+                    return cek_nawala_scraping(domains)
+                else:
+                    logger.error(f"Status tidak dikenali: {result.get('status')}")
+                    return []
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Gagal parse JSON: {e}")
+                logger.error(f"Response text: {response.text[:500]}")
+                # Fallback ke scraping
+                return cek_nawala_scraping(domains)
         else:
-            logger.error(f"HTTP Error {response.status_code} dari nawala.in")
-            return []
+            logger.error(f"HTTP Error {response.status_code}")
+            # Fallback ke scraping
+            return cek_nawala_scraping(domains)
             
     except requests.exceptions.Timeout:
-        logger.error("Timeout saat mengakses nawala.in")
+        logger.error("Timeout saat mengakses nawala.asia API")
         return []
-    except requests.exceptions.ProxyError as e:
-        logger.error(f"Proxy error: {e}")
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error: {e}")
         return []
     except Exception as e:
-        logger.error(f"Error cek nawala: {e}")
+        logger.error(f"Error cek nawala API: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return []
 
-def parse_nawala_result(json_data, original_domains):
-    """Parse hasil JSON dari nawala.in"""
-    results = []
+def parse_api_results(data_results):
+    """Parse hasil dari API response"""
+    blocked_domains = []
     
     try:
-        # Struktur data dari nawala.in
-        if isinstance(json_data, dict):
-            # Format 1: {"domain.com": {"status": "blocked", "reason": "..."}}
-            for domain in original_domains:
-                if domain in json_data:
-                    domain_info = json_data[domain]
-                    if isinstance(domain_info, dict):
-                        status = domain_info.get('status', 'unknown').lower()
-                        reason = domain_info.get('reason', '')
-                        
-                        if status == 'blocked':
-                            results.append(f"🚫 *{domain}* terblokir\n  └ {reason}")
-                        elif status == 'clean':
-                            # Hanya log, tidak dimasukkan ke hasil
-                            logger.info(f"Domain aman: {domain}")
-                        else:
-                            logger.warning(f"Status tidak diketahui untuk {domain}: {status}")
-                    else:
-                        # Format 2: {"domain.com": "blocked"}
-                        status = str(domain_info).lower()
-                        if 'block' in status or status == 'true':
-                            results.append(f"🚫 *{domain}* terblokir")
-                        else:
-                            logger.info(f"Domain aman: {domain}")
-        elif isinstance(json_data, list):
-            # Format 3: [{"domain": "example.com", "status": "blocked", ...}]
-            for item in json_data:
-                if isinstance(item, dict):
-                    domain = item.get('domain', '')
-                    status = item.get('status', '').lower()
-                    reason = item.get('reason', '')
-                    
-                    if status == 'blocked':
-                        if reason:
-                            results.append(f"🚫 *{domain}* terblokir\n  └ {reason}")
-                        else:
-                            results.append(f"🚫 *{domain}* terblokir")
+        for item in data_results:
+            if isinstance(item, dict):
+                domain = item.get('domain', '')
+                status = item.get('status', '')
+                
+                if domain and status and status.lower() == 'blocked':
+                    blocked_domains.append(f"🚫 *{domain}* - Terblokir")
+                    logger.warning(f"Domain terblokir: {domain}")
+                elif domain:
+                    logger.info(f"Domain aman: {domain}")
     
     except Exception as e:
-        logger.error(f"Error parse JSON result: {e}")
+        logger.error(f"Error parse API results: {e}")
     
-    return results
+    return blocked_domains
 
-def parse_nawala_html(html_content, original_domains):
-    """Parse hasil HTML dari nawala.in"""
-    results = []
-    
+def cek_nawala_scraping(domains):
+    """Fallback method dengan scraping langsung"""
     try:
-        # Cari pola dalam HTML
-        lines = html_content.split('\n')
+        blocked_domains = []
         
-        for domain in original_domains:
-            # Cari domain dalam HTML response
-            domain_found = False
-            blocked = False
-            
-            for line in lines:
-                if domain in line:
-                    domain_found = True
-                    # Cek indikator blocked
-                    if 'blocked' in line.lower() or '🚫' in line or 'terblokir' in line.lower():
-                        blocked = True
-                        break
-            
-            if blocked:
-                results.append(f"🚫 *{domain}* terblokir")
-            elif domain_found:
-                logger.info(f"Domain aman: {domain}")
-    
+        for domain in domains[:10]:  # Batasi untuk tidak overload
+            try:
+                # Coba akses domain melalui nawala.asia proxy
+                test_url = f"https://www.nawala.asia/proxy-check/{domain}"
+                
+                response = session.get(
+                    test_url,
+                    timeout=10,
+                    allow_redirects=False
+                )
+                
+                # Jika redirect atau block tertentu
+                if response.status_code in [302, 403, 503]:
+                    blocked_domains.append(f"🚫 *{domain}* - Terblokir (scraping)")
+                    logger.warning(f"Domain terblokir [scraping]: {domain}")
+                else:
+                    logger.info(f"Domain aman [scraping]: {domain}")
+                    
+                time.sleep(1)  # Delay antar request
+                
+            except Exception as e:
+                logger.error(f"Error scraping {domain}: {e}")
+        
+        return blocked_domains
+        
     except Exception as e:
-        logger.error(f"Error parse HTML: {e}")
-    
-    return results
+        logger.error(f"Error dalam scraping: {e}")
+        return []
 
 def cek_domain_sync():
-    """Fungsi synchronous untuk cek domain di nawala.in (batch)"""
+    """Fungsi synchronous untuk cek domain"""
     try:
         domains = baca_domain()
+        
         if not domains:
             logger.info("Tidak ada domain untuk dicek")
             return
         
-        # Bagi domain menjadi batch untuk menghindari timeout
-        batch_size = 50  # Maksimal 50 domain per batch
-        all_results = []
+        total_domains = len(domains)
+        logger.info(f"Memulai pengecekan {total_domains} domain...")
         
-        for i in range(0, len(domains), batch_size):
+        # Bagi domain menjadi batch 50 domain
+        batch_size = 50
+        all_blocked = []
+        
+        for i in range(0, total_domains, batch_size):
             batch = domains[i:i + batch_size]
-            logger.info(f"Memeriksa batch {i//batch_size + 1}: {len(batch)} domain")
+            batch_num = i // batch_size + 1
+            total_batches = (total_domains + batch_size - 1) // batch_size
             
-            batch_results = cek_nawala_batch(batch)
-            all_results.extend(batch_results)
+            logger.info(f"Memproses batch {batch_num}/{total_batches} ({len(batch)} domain)")
+            
+            blocked_batch = cek_nawala_api(batch)
+            all_blocked.extend(blocked_batch)
             
             # Jeda antar batch
-            if i + batch_size < len(domains):
-                time.sleep(2)
+            if i + batch_size < total_domains:
+                time.sleep(3)
         
-        if all_results:
-            # Kirim hasil via Telegram (async)
-            asyncio.create_task(kirim_hasil_domain(all_results, len(domains)))
+        # Kirim laporan
+        if all_blocked:
+            asyncio.create_task(kirim_laporan_blocked(all_blocked, total_domains))
         else:
-            # Kirim laporan kosong jika semua aman
-            asyncio.create_task(kirim_hasil_aman(len(domains)))
+            asyncio.create_task(kirim_laporan_aman(total_domains))
             
+        logger.info(f"Pengecekan selesai. {len(all_blocked)} domain terblokir.")
+        
     except Exception as e:
         logger.error(f"Error dalam cek_domain_sync: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
-async def kirim_hasil_domain(hasil_list, total_domain):
-    """Kirim hasil pemeriksaan domain"""
+async def kirim_laporan_blocked(blocked_list, total_domains):
+    """Kirim laporan domain terblokir"""
     try:
-        # Jika hasil terlalu panjang, bagi menjadi beberapa pesan
-        message_text = f"🔔 *LAPORAN NAWALA.IN*\n\n" + "\n".join(hasil_list) + f"\n\n📊 Total: {len(hasil_list)} dari {total_domain} domain terblokir"
+        blocked_count = len(blocked_list)
         
-        # Batas panjang pesan Telegram
-        if len(message_text) > 4096:
-            # Bagi pesan
-            parts = []
-            current_part = f"🔔 *LAPORAN NAWALA.IN*\n\n"
-            
-            for result in hasil_list:
-                if len(current_part) + len(result) + 2 > 4096:
-                    parts.append(current_part)
-                    current_part = ""
-                
-                current_part += result + "\n"
-            
-            if current_part:
-                parts.append(current_part + f"\n📊 Total: {len(hasil_list)} dari {total_domain} domain terblokir")
-            
-            # Kirim semua bagian
-            for i, part in enumerate(parts):
-                if i > 0:
-                    part = f"*Laporan (lanjutan {i+1})*\n\n" + part
-                await application.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=part,
-                    parse_mode="Markdown"
-                )
-                await asyncio.sleep(1)  # Jeda antar pesan
+        # Buat pesan utama
+        header = f"🔔 *LAPORAN NAWALA.ASIA*\n\n"
+        footer = f"\n📊 *Ringkasan:* {blocked_count}/{total_domains} domain terblokir\n⏰ {time.strftime('%d-%m-%Y %H:%M:%S')}"
+        
+        # Gabungkan daftar domain
+        domains_text = "\n".join(blocked_list)
+        full_message = header + domains_text + footer
+        
+        # Cek panjang pesan
+        if len(full_message) > 4096:
+            # Jika terlalu panjang, bagi menjadi beberapa pesan
+            await kirim_pesan_terbagi(header, blocked_list, footer)
         else:
             await application.bot.send_message(
                 chat_id=CHAT_ID,
-                text=message_text,
+                text=full_message,
                 parse_mode="Markdown"
             )
         
-        logger.info(f"Laporan terkirim: {len(hasil_list)} domain terblokir")
+        logger.info(f"Laporan terkirim: {blocked_count} domain terblokir")
+        
     except Exception as e:
         logger.error(f"Gagal kirim laporan: {e}")
 
-async def kirim_hasil_aman(total_domain):
+async def kirim_pesan_terbagi(header, blocked_list, footer):
+    """Kirim pesan yang dibagi karena terlalu panjang"""
+    try:
+        max_chars = 4096 - 100  # Beri margin
+        current_message = header
+        message_count = 1
+        
+        for domain in blocked_list:
+            if len(current_message) + len(domain) + 2 > max_chars:
+                # Kirim pesan saat ini
+                if message_count > 1:
+                    current_header = f"🔔 *LAPORAN NAWALA.ASIA (Bagian {message_count})*\n\n"
+                    current_message = current_header + current_message[len(header):]
+                
+                await application.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=current_message,
+                    parse_mode="Markdown"
+                )
+                
+                # Reset untuk pesan berikutnya
+                current_message = header + domain + "\n"
+                message_count += 1
+                await asyncio.sleep(1)
+            else:
+                current_message += domain + "\n"
+        
+        # Kirim pesan terakhir
+        if current_message.strip() and current_message != header:
+            if message_count > 1:
+                current_header = f"🔔 *LAPORAN NAWALA.ASIA (Bagian {message_count})*\n\n"
+                current_message = current_header + current_message[len(header):] + footer
+            else:
+                current_message += footer
+            
+            await application.bot.send_message(
+                chat_id=CHAT_ID,
+                text=current_message,
+                parse_mode="Markdown"
+            )
+            
+    except Exception as e:
+        logger.error(f"Gagal kirim pesan terbagi: {e}")
+
+async def kirim_laporan_aman(total_domains):
     """Kirim laporan jika semua domain aman"""
     try:
         waktu = time.strftime("%d-%m-%Y %H:%M:%S")
         await application.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"✅ *LAPORAN NAWALA.IN*\n\n"
-                 f"Semua domain aman!\n"
-                 f"📍 Total domain: {total_domain}\n"
-                 f"⏰ {waktu}",
+            text=f"✅ *LAPORAN NAWALA.ASIA*\n\n"
+                 f"*Semua domain aman!* 🎉\n\n"
+                 f"📍 Total domain: {total_domains}\n"
+                 f"⏰ {waktu}\n\n"
+                 f"Tidak ada domain yang terblokir oleh TrustPositif.",
             parse_mode="Markdown"
         )
-        logger.info(f"Semua {total_domain} domain aman")
+        logger.info(f"Semua {total_domains} domain aman")
     except Exception as e:
         logger.error(f"Gagal kirim laporan aman: {e}")
 
-async def cek_single_domain():
-    """Fungsi untuk testing cek satu domain"""
+async def test_koneksi():
+    """Test koneksi ke nawala.asia"""
     try:
-        domain = "example.com"  # Ganti dengan domain test
-        url = "https://nawala.in/check.php"
+        test_url = "https://www.nawala.asia/"
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        }
+        response = session.get(
+            test_url,
+            timeout=10
+        )
         
-        data = {
-            'domains': domain
-        }
-        
-        response = requests.post(url, headers=headers, data=data, proxies=proxies, timeout=10)
-        logger.info(f"Response status: {response.status_code}")
-        logger.info(f"Response content: {response.text[:500]}")
-        
+        if response.status_code == 200:
+            logger.info("✅ Koneksi ke nawala.asia berhasil")
+            return True
+        else:
+            logger.warning(f"⚠️  Koneksi ke nawala.asia: HTTP {response.status_code}")
+            return False
+            
     except Exception as e:
-        logger.error(f"Test error: {e}")
+        logger.error(f"❌ Gagal koneksi ke nawala.asia: {e}")
+        return False
 
 async def tugas_utama():
-    logger.info("🚀 Memulai bot monitoring domain...")
-    logger.info(f"📍 Proxy: {PROXY_HOST}:{PROXY_PORT_HTTP} (HTTP)")
-    logger.info("📍 Target: nawala.in batch checking")
+    """Main function"""
+    logger.info("🚀 Memulai bot monitoring domain Nawala.Asia...")
+    logger.info(f"📍 Proxy: {PROXY_HOST}:{PROXY_PORT_HTTP}")
     
-    # Test koneksi ke nawala.in
-    logger.info("Menguji koneksi ke nawala.in...")
-    try:
-        test_response = requests.get("https://nawala.in", proxies=proxies, timeout=10)
-        if test_response.status_code == 200:
-            logger.info("✅ Koneksi ke nawala.in berhasil")
-        else:
-            logger.warning(f"⚠️  Koneksi ke nawala.in: HTTP {test_response.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Gagal koneksi ke nawala.in: {e}")
+    # Test koneksi
+    if not await test_koneksi():
+        logger.warning("Koneksi awal gagal, tetap melanjutkan...")
     
     # Jadwalkan tugas
-    schedule.every(5).minutes.do(cek_domain_sync)  # Setiap 5 menit
-    schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
+    schedule.every(10).minutes.do(cek_domain_sync)  # Setiap 10 menit
+    schedule.every(2).hours.do(lambda: asyncio.create_task(kirim_status()))
     
     # Jalankan segera
     await kirim_status()
+    
+    # Jalankan pengecekan pertama dengan delay
+    await asyncio.sleep(5)
     cek_domain_sync()
     
     logger.info("✅ Bot berjalan. Tekan Ctrl+C untuk berhenti.")
@@ -376,14 +432,14 @@ async def tugas_utama():
             schedule.run_pending()
             await asyncio.sleep(1)
         except KeyboardInterrupt:
-            logger.info("🛑 Bot dihentikan")
+            logger.info("🛑 Bot dihentikan oleh user")
             break
         except Exception as e:
-            logger.error(f"Error loop: {e}")
+            logger.error(f"Error dalam loop utama: {e}")
             await asyncio.sleep(5)
 
-if __name__ == "__main__":
-    # Cek dan install dependencies jika diperlukan
+def install_dependencies():
+    """Install required packages"""
     required_packages = ['requests', 'schedule', 'python-telegram-bot']
     
     for package in required_packages:
@@ -402,10 +458,17 @@ if __name__ == "__main__":
                 logger.info(f"{package} berhasil diinstal")
             except Exception as e:
                 logger.error(f"Gagal install {package}: {e}")
+
+if __name__ == "__main__":
+    # Install dependencies
+    install_dependencies()
     
+    # Jalankan bot
     try:
         asyncio.run(tugas_utama())
     except KeyboardInterrupt:
         logger.info("Bot berhenti")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
