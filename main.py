@@ -1,282 +1,246 @@
 import os
 import sys
 import time
-import schedule
+import hashlib
 import requests
 import asyncio
-import json
 import logging
 from telegram.ext import Application
 
-# Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Config
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not TOKEN or not CHAT_ID:
-    logger.error("Token atau Chat ID tidak ditemukan!")
+    logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
 
-# Proxy configuration
-PROXY_HOST = "95.135.92.164"
-PROXY_PORT_HTTP = 59100
-PROXY_PORT_SOCKS5 = 59101
-PROXY_USERNAME = "pulsaslot1888"
-PROXY_PASSWORD = "b3Kft6IMwG"
+# Bot setup
+application = Application.builder().token(TOKEN).build()
 
-# Proxy URLs
-PROXY_HTTP = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT_HTTP}"
-PROXY_SOCKS5 = f"socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT_SOCKS5}"
-
-# Konfigurasi proxy untuk requests
-proxies = {
-    'http': PROXY_HTTP,
-    'https': PROXY_HTTP,
-}
-
-# Bot setup dengan proxy SOCKS5
-try:
-    application = Application.builder()\
-        .token(TOKEN)\
-        .get_updates_proxy_url(PROXY_SOCKS5)\
-        .build()
-    logger.info("Bot berhasil diinisialisasi dengan proxy SOCKS5")
-except Exception as e:
-    logger.warning(f"Gagal setup proxy SOCKS5: {e}. Menggunakan tanpa proxy...")
-    application = Application.builder().token(TOKEN).build()
-
-# Session dengan retry
-session = requests.Session()
-session.proxies.update(proxies)
+class NawalaChecker:
+    def __init__(self):
+        self.session = requests.Session()
+        self.base_url = "https://www.nawala.asia"
+        
+    def get_csrf_token(self):
+        """Dapatkan CSRF token dari homepage"""
+        try:
+            response = self.session.get(self.base_url, timeout=10)
+            if response.status_code == 200:
+                # Cari token dalam HTML
+                html = response.text
+                # Cari input hidden yang mungkin mengandung token
+                import re
+                token_patterns = [
+                    r'name="csrf_token"\s+value="([^"]+)"',
+                    r'name="_token"\s+value="([^"]+)"',
+                    r'name="token"\s+value="([^"]+)"'
+                ]
+                for pattern in token_patterns:
+                    match = re.search(pattern, html)
+                    if match:
+                        return match.group(1)
+        except Exception as e:
+            logger.error(f"Error get CSRF: {e}")
+        return ""
+    
+    def simulate_browser_request(self, domains):
+        """Simulasi request browser lengkap"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': self.base_url,
+                'Referer': self.base_url + '/',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+            }
+            
+            # Format domains
+            domains_text = "\n".join(domains[:20])  # Max 20 dulu
+            
+            # Data form
+            form_data = {
+                'domains': domains_text,
+                'recaptchaToken': self.generate_dummy_captcha(),
+                'action': 'check'
+            }
+            
+            # URL target (dari form action)
+            check_url = self.base_url + "/"  # Form submit ke root
+            
+            logger.info(f"Mengirim {len(domains)} domain ke nawala.asia...")
+            
+            response = self.session.post(
+                check_url,
+                data=form_data,
+                headers=headers,
+                timeout=30,
+                allow_redirects=True
+            )
+            
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                return self.parse_response(response.text, domains)
+            else:
+                logger.error(f"HTTP Error: {response.status_code}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error simulate request: {e}")
+            return []
+    
+    def generate_dummy_captcha(self):
+        """Generate dummy recaptcha token"""
+        timestamp = str(int(time.time()))
+        return f"dummy_token_{timestamp}_{hashlib.md5(timestamp.encode()).hexdigest()[:10]}"
+    
+    def parse_response(self, html, original_domains):
+        """Parse HTML response untuk cari hasil"""
+        blocked = []
+        
+        try:
+            # Cari tabel hasil
+            lines = html.split('\n')
+            in_table = False
+            
+            for line in lines:
+                line_lower = line.lower()
+                
+                # Cari awal tabel
+                if '<table' in line_lower and 'result' in line_lower:
+                    in_table = True
+                    continue
+                
+                if in_table and '</table>' in line_lower:
+                    break
+                
+                # Cari baris dengan domain
+                if in_table and '<tr>' in line_lower:
+                    # Ekstrak domain dan status dari baris
+                    for domain in original_domains:
+                        if domain in line:
+                            # Cek status blocked
+                            if 'blocked' in line_lower or '🚫' in line or 'text-danger' in line_lower:
+                                blocked.append(f"🚫 *{domain}*")
+                                logger.warning(f"Terblokir ditemukan: {domain}")
+                                break
+            
+            # Alternatif parsing
+            if not blocked:
+                for domain in original_domains:
+                    if domain in html:
+                        # Cek pattern blocked
+                        pattern1 = f'{domain}.*?(blocked|terblokir|🚫|text-danger)'
+                        import re
+                        if re.search(pattern1, html, re.IGNORECASE):
+                            blocked.append(f"🚫 *{domain}*")
+                            logger.warning(f"Terblokir (regex): {domain}")
+        
+        except Exception as e:
+            logger.error(f"Error parse response: {e}")
+        
+        return blocked
+    
+    def check_domains(self, domains):
+        """Main check function"""
+        return self.simulate_browser_request(domains)
 
 def baca_domain():
-    """Baca domain dari file domain.txt"""
     try:
         with open("domain.txt", "r") as f:
-            domains = []
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    # Bersihkan domain
-                    for prefix in ['http://', 'https://', 'www.']:
-                        if line.startswith(prefix):
-                            line = line[len(prefix):]
-                    line = line.rstrip('/')
-                    if '.' in line and len(line) > 3:
-                        domains.append(line.lower())
-            return domains
-    except Exception as e:
-        logger.error(f"Error baca domain: {e}")
+            return [line.strip().lower() for line in f 
+                   if line.strip() and not line.startswith('#')]
+    except:
         return []
 
 async def kirim_status():
-    """Kirim status bot"""
     try:
-        waktu = time.strftime("%d-%m-%Y %H:%M:%S")
         await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"🤖 *Bot Monitoring Domain* aktif!\n⏰ {waktu}\n📍 Skiddle.id API",
+            CHAT_ID,
+            f"🤖 *Nawala Bot Aktif*\n{time.strftime('%d-%m-%Y %H:%M:%S')}",
             parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Gagal kirim status: {e}")
+        logger.error(f"Status error: {e}")
 
-def cek_domain_skiddle(domains):
-    """Cek domain menggunakan API Skiddle.id - SIMPLE VERSION"""
-    try:
-        if not domains:
-            return []
-        
-        blocked_domains = []
-        
-        # Skiddle API bisa handle multiple domain sekaligus
-        domains_str = ','.join(domains)
-        api_url = f"https://check.skiddle.id/?domains={domains_str}"
-        
-        logger.info(f"Checking {len(domains)} domains via Skiddle...")
-        
-        response = session.get(api_url, timeout=15)
-        
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                
-                for domain in domains:
-                    if domain in data:
-                        domain_data = data[domain]
-                        if isinstance(domain_data, dict) and domain_data.get('blocked', False):
-                            blocked_domains.append(f"🚫 *{domain}*")
-                            logger.warning(f"Blocked: {domain}")
-                        else:
-                            logger.info(f"OK: {domain}")
-                    else:
-                        logger.warning(f"Domain not in response: {domain}")
-                        
-            except json.JSONDecodeError:
-                logger.error("Invalid JSON response")
-                # Fallback: cek satu per satu
-                for domain in domains:
-                    try:
-                        single_url = f"https://check.skiddle.id/?domains={domain}"
-                        resp = session.get(single_url, timeout=10)
-                        if resp.status_code == 200:
-                            single_data = resp.json()
-                            if domain in single_data and single_data[domain].get('blocked', False):
-                                blocked_domains.append(f"🚫 *{domain}*")
-                                logger.warning(f"Blocked (single): {domain}")
-                            else:
-                                logger.info(f"OK (single): {domain}")
-                        time.sleep(0.5)
-                    except:
-                        pass
-        
-        return blocked_domains
-        
-    except Exception as e:
-        logger.error(f"Error checking domains: {e}")
-        return []
+async def kirim_laporan(blocked, total):
+    if not blocked:
+        await application.bot.send_message(
+            CHAT_ID,
+            f"✅ *Semua Aman*\n{total} domain checked\n{time.strftime('%H:%M:%S')}",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Buat pesan
+    chunks = []
+    current = f"🔔 *Domain Terblokir*\n\n"
+    
+    for domain in blocked:
+        if len(current) + len(domain) + 10 > 4000:
+            chunks.append(current)
+            current = f"*Lanjutan...*\n\n"
+        current += f"{domain}\n"
+    
+    if current:
+        current += f"\n📊 {len(blocked)}/{total} domain"
+        current += f"\n⏰ {time.strftime('%d-%m-%Y %H:%M:%S')}"
+        chunks.append(current)
+    
+    # Kirim semua chunks
+    for chunk in chunks:
+        await application.bot.send_message(CHAT_ID, chunk, parse_mode="Markdown")
+        await asyncio.sleep(1)
 
-def cek_domain_sync():
-    """Fungsi synchronous untuk cek domain"""
+def cek_domain_job():
+    """Job untuk schedule"""
     try:
         domains = baca_domain()
-        
         if not domains:
-            logger.info("No domains to check")
             return
         
-        logger.info(f"Checking {len(domains)} domains...")
+        checker = NawalaChecker()
+        blocked = checker.check_domains(domains)
         
-        # Gunakan Skiddle API
-        blocked = cek_domain_skiddle(domains)
-        
-        # Kirim laporan
-        if blocked:
-            asyncio.create_task(kirim_laporan(blocked, len(domains)))
-        else:
-            asyncio.create_task(kirim_laporan_aman(len(domains)))
-            
-        logger.info(f"Done. {len(blocked)} domains blocked.")
+        asyncio.create_task(kirim_laporan(blocked, len(domains)))
         
     except Exception as e:
-        logger.error(f"Error in check: {e}")
+        logger.error(f"Job error: {e}")
 
-async def kirim_laporan(blocked_list, total):
-    """Kirim laporan domain terblokir"""
-    try:
-        if not blocked_list:
-            return
-            
-        message = f"🔔 *DOMAIN BLOCK REPORT*\n\n"
-        message += "\n".join(blocked_list)
-        message += f"\n\n📊 *Summary:* {len(blocked_list)}/{total} domains blocked"
-        message += f"\n⏰ {time.strftime('%d-%m-%Y %H:%M:%S')}"
-        
-        await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="Markdown"
-        )
-        
-    except Exception as e:
-        logger.error(f"Failed to send report: {e}")
-
-async def kirim_laporan_aman(total):
-    """Kirim laporan jika semua domain aman"""
-    try:
-        await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f"✅ *ALL DOMAINS ARE SAFE*\n\n"
-                 f"No blocked domains found!\n"
-                 f"Total checked: {total}\n"
-                 f"Time: {time.strftime('%d-%m-%Y %H:%M:%S')}",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Failed to send safe report: {e}")
-
-async def tugas_utama():
-    """Main function"""
-    logger.info("🚀 Starting Domain Monitor Bot...")
+async def main():
+    logger.info("🚀 Nawala.Asia Bot Starting...")
     
-    # Test connection
-    try:
-        test = session.get("https://check.skiddle.id/?domains=google.com", timeout=10)
-        if test.status_code == 200:
-            logger.info("✅ Skiddle API is working")
-        else:
-            logger.warning(f"⚠️ Skiddle API returned {test.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Connection test failed: {e}")
-    
-    # Schedule tasks
-    schedule.every(5).minutes.do(cek_domain_sync)
-    schedule.every(1).hours.do(lambda: asyncio.create_task(kirim_status()))
-    
-    # Run immediately
     await kirim_status()
+    
+    # Schedule
+    schedule.every(15).minutes.do(cek_domain_job)
+    
+    # Run first check
     await asyncio.sleep(2)
-    cek_domain_sync()
+    cek_domain_job()
     
-    logger.info("✅ Bot is running. Press Ctrl+C to stop.")
+    logger.info("✅ Bot running...")
     
-    # Main loop
     while True:
-        try:
-            schedule.run_pending()
-            await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("🛑 Bot stopped")
-            break
-        except Exception as e:
-            logger.error(f"Loop error: {e}")
-            await asyncio.sleep(5)
-
-def install_deps():
-    """Install required packages"""
-    try:
-        import subprocess
-        import importlib
-        
-        required = ['requests', 'schedule', 'python-telegram-bot']
-        
-        for package in required:
-            try:
-                if package == 'python-telegram-bot':
-                    import telegram
-                    logger.info(f"telegram-bot installed")
-                else:
-                    importlib.import_module(package)
-                    logger.info(f"{package} installed")
-            except ImportError:
-                logger.info(f"Installing {package}...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-                logger.info(f"{package} installed successfully")
-                
-    except Exception as e:
-        logger.error(f"Failed to install dependencies: {e}")
-
-# Create domain.txt if not exists
-if not os.path.exists("domain.txt"):
-    with open("domain.txt", "w") as f:
-        f.write("# Add your domains here, one per line\n")
-        f.write("google.com\n")
-        f.write("facebook.com\n")
-        f.write("example.com\n")
-    logger.info("Created domain.txt template")
+        schedule.run_pending()
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    install_deps()
-    
     try:
-        asyncio.run(tugas_utama())
+        asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Bot stopped")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal: {e}")
