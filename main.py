@@ -329,11 +329,11 @@ async def kirim_laporan(blocked_domains, total_domains):
         if blocked_count == 0:
             # Semua domain aman
             message = (
-                "✅ *LAPORAN TRUSTPOSITIF KOMINFO*\n\n"
+                "✅ *LAPORAN CEK NAWALA*\n\n"
                 "**SEMUA DOMAIN AMAN!** 🎉\n\n"
                 f"📊 **Total Domain:** {total_domains}\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "Tidak ada domain yang terblokir oleh TrustPositif Kominfo."
+                "Tidak ada domain yang nawala."
             )
             
             await application.bot.send_message(
