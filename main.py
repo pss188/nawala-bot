@@ -351,7 +351,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 domain_list += f"{i}. 🚫 `{domain_info}`\n"
             
             message = (
-                "🚨 *LAPORAN DOMAIN TERBLOKIR*\n\n"
+                "❌❌❌❌❌❌❌❌❌\n\n"
                 f"**{blocked_count} DOMAIN TERBLOKIR**\n\n"
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
