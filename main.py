@@ -306,7 +306,6 @@ async def kirim_status():
             "🤖 *TrustPositif Monitoring Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
-            f"📍 **Sumber:** trustpositif.komdigi.go.id\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Batch:** 5 domain/request\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
@@ -357,7 +356,6 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: trustpositif.komdigi.go.id_"
             )
             
             # Cek panjang pesan
