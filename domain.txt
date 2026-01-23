@@ -15,5 +15,4 @@ jendelaresmi.pages.dev
 mvphoki.cfd
 rtpbarujtjt.pages.dev
 jendelatoto.skin
-jendelatoto.bond
 jendelatoto.rest
