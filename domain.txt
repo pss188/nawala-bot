@@ -14,3 +14,6 @@ mvphoki.cfd
 jendelatoto.skin
 jendelatoto.rest
 rtpjendelaoke.pages.dev
+hkbvip.website
+hkbvip.shop
+hkbvip.space
