@@ -17,3 +17,6 @@ hkbvip.space
 jendelaresmi.beauty
 jendelaresmi.hair
 jendelaresmi.makeup
+jendelaresmi.skin
+jendelaresmi.monster
+jendelaresmi.rest
