@@ -13,5 +13,4 @@ hkbvip.website
 hkbvip.shop
 hkbvip.space
 jendelaresmi.skin
-jendelaresmi.monster
 jendelaresmi.rest
