@@ -14,3 +14,6 @@ hkbvip.shop
 hkbvip.space
 jendelaresmi.skin
 jendelaresmi.rest
+jendelaresmi.quest
+jendelaresmi.click
+jendelaresmi.autos
