@@ -12,7 +12,6 @@ rtpjendelaoke.pages.dev
 hkbvip.website
 hkbvip.shop
 hkbvip.space
-jendelaresmi.rest
 jendelaresmi.quest
 jendelaresmi.click
 jendelaresmi.autos
