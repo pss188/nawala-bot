@@ -13,4 +13,3 @@ hkbvip.website
 hkbvip.shop
 hkbvip.space
 jendelaresmi.quest
-jendelaresmi.autos
