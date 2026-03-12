@@ -12,7 +12,6 @@ rtpjendelaoke.pages.dev
 hkbvip.website
 hkbvip.shop
 hkbvip.space
-jendelaresmi.quest
 jendelaresmi.boats
 jendelaresmi.homes
 jendelaresmi.lol
