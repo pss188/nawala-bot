@@ -10,6 +10,7 @@ import re
 from telegram.ext import Application
 from datetime import datetime
 import urllib3
+from bs4 import BeautifulSoup
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -29,47 +30,6 @@ if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
 
-# ============================================
-# PROXY CONFIGURATION - MULTIPLE PROXY OPTIONS
-# ============================================
-
-# Daftar proxy yang bisa dicoba (ganti dengan proxy yang valid)
-PROXY_LIST = [
-   ("95.135.92.164", "59100", "pulsaslot1888", "b3Kft6IMwG"),
-    ("193.5.64.24", "59100", "pulsaslot1888", "b3Kft6IMwG")
-]
-
-# Proxy dari environment
-ENV_PROXY_HOST = os.getenv("PROXY_HOST", "")
-ENV_PROXY_PORT = os.getenv("PROXY_PORT", "")
-ENV_PROXY_USER = os.getenv("PROXY_USER", "")
-ENV_PROXY_PASS = os.getenv("PROXY_PASS", "")
-
-if ENV_PROXY_HOST and ENV_PROXY_PORT:
-    PROXY_LIST.append((ENV_PROXY_HOST, ENV_PROXY_PORT, ENV_PROXY_USER, ENV_PROXY_PASS))
-
-# Tambahkan proxy gratis (tidak stabil, tapi bisa dicoba)
-FREE_PROXIES = [
-    # Proxy Indonesia (ganti dengan yang aktif)
-    # Cek di: https://free-proxy-list.net/ atau https://www.sslproxies.org/
-]
-
-PROXY_LIST.extend(FREE_PROXIES)
-
-logger.info(f"📋 {len(PROXY_LIST)} proxy tersedia untuk dicoba")
-
-def get_proxy_dict(host, port, username="", password=""):
-    """Buat dictionary proxy"""
-    if username and password:
-        proxy_url = f"http://{username}:{password}@{host}:{port}"
-    else:
-        proxy_url = f"http://{host}:{port}"
-    
-    return {
-        'http': proxy_url,
-        'https': proxy_url,
-    }
-
 # Bot setup
 try:
     application = Application.builder().token(TOKEN).build()
@@ -78,20 +38,12 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-class TrustPositifChecker:
-    def __init__(self, proxy_config=None):
+class NawalaChecker:
+    def __init__(self):
         self.session = requests.Session()
-        self.base_url = "https://trustpositif.komdigi.go.id"
-        self.proxy_config = proxy_config
+        self.base_url = "https://www.nawala.asia"
         
-        # Set proxy jika ada
-        if proxy_config:
-            self.session.proxies.update(proxy_config)
-            logger.info(f"🔑 Menggunakan proxy: {proxy_config.get('http', 'unknown')}")
-        else:
-            logger.info("🔓 Koneksi langsung (tanpa proxy)")
-        
-        # Headers
+        # Headers untuk meniru browser
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -99,178 +51,324 @@ class TrustPositifChecker:
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         }
         
+        # Ambil token dari halaman
         self.csrf_token = self._get_csrf_token()
-        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
-    
+        self.recaptcha_token = None
+        
+        # Coba dapatkan struktur API dari JavaScript
+        self.api_endpoints = self._discover_api_endpoints()
+        
     def _get_csrf_token(self):
-        """Fetch CSRF token"""
+        """Fetch CSRF token dari halaman"""
         try:
-            logger.info("🔄 Fetching CSRF token...")
+            logger.info("🔄 Fetching CSRF token from Nawala...")
             response = self.session.get(
                 self.base_url,
                 headers=self.headers,
-                timeout=30,
+                timeout=20,
                 verify=False
             )
             
             if response.status_code == 200:
-                # Cari CSRF token dengan regex
-                match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
-                if match:
-                    token = match.group(1)
-                    logger.info(f"✅ CSRF token fetched: {token[:10]}...")
+                # Cari di HTML
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Cari meta tags atau script
+                csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+                if csrf_meta and csrf_meta.get('content'):
+                    token = csrf_meta.get('content')
+                    logger.info(f"✅ CSRF token found: {token[:10]}...")
                     return token
                 
-                match = re.search(r'csrf_token" value="([^"]+)"', response.text)
-                if match:
-                    token = match.group(1)
-                    logger.info(f"✅ CSRF token fetched (alt): {token[:10]}...")
-                    return token
+                # Cari di script
+                scripts = soup.find_all('script')
+                for script in scripts:
+                    if script.string and 'csrf' in script.string.lower():
+                        match = re.search(r'csrf[_\s]*token["\']?\s*[:=]\s*["\']([^"\']+)', script.string)
+                        if match:
+                            token = match.group(1)
+                            logger.info(f"✅ CSRF token from script: {token[:10]}...")
+                            return token
             
-            logger.warning("⚠️ Gagal fetch CSRF token, menggunakan default")
-            return "3835f8d38d9c0a271d2d782a70113bc2"
+            logger.warning("⚠️ CSRF token not found, using default")
+            return "default_token"
             
         except Exception as e:
-            logger.error(f"❌ Gagal fetch CSRF token: {e}")
-            return "3835f8d38d9c0a271d2d782a70113bc2"
+            logger.error(f"❌ Error getting CSRF token: {e}")
+            return "default_token"
+    
+    def _discover_api_endpoints(self):
+        """Discover API endpoints from the page"""
+        endpoints = {}
+        try:
+            # Coba cari tahu endpoint dari JavaScript
+            response = self.session.get(
+                self.base_url,
+                headers=self.headers,
+                timeout=20,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                # Cari pola URL Supabase
+                supabase_pattern = r'https://[a-zA-Z0-9-]+\.supabase\.co/functions/v1/[a-zA-Z0-9-]+'
+                matches = re.findall(supabase_pattern, response.text)
+                
+                if matches:
+                    endpoints['supabase_functions'] = matches
+                    logger.info(f"✅ Found Supabase endpoints: {matches}")
+                
+                # Cari pola API endpoint
+                api_pattern = r'["\'](/api/[a-zA-Z0-9-/]+)["\']'
+                matches = re.findall(api_pattern, response.text)
+                if matches:
+                    endpoints['api'] = matches
+                    logger.info(f"✅ Found API endpoints: {matches}")
+            
+            return endpoints
+            
+        except Exception as e:
+            logger.error(f"❌ Error discovering endpoints: {e}")
+            return {}
     
     def check_batch_5_domains(self, domains):
-        """Cek 5 domain sekaligus"""
+        """Cek domain menggunakan Nawala.asia"""
         try:
             if len(domains) > 5:
                 domains = domains[:5]
             
-            domains_text = "\n".join(domains)
-            logger.info(f"🔍 Mengecek batch: {', '.join(domains)}")
+            logger.info(f"🔍 Checking batch: {', '.join(domains)}")
             
-            # Refresh token
-            self.csrf_token = self._get_csrf_token()
+            # Karena website pakai React SPA, kemungkinan API ada di Supabase
+            # Kita coba beberapa pendekatan
             
-            data = {
-                'csrf_token': self.csrf_token,
-                'name': domains_text
-            }
+            # Pendekatan 1: Coba API langsung
+            result = self._try_api_check(domains)
+            if result is not None:
+                return result
             
-            api_headers = self.headers.copy()
-            api_headers.update({
-                'X-Requested-With': 'XMLHttpRequest',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Referer': f'{self.base_url}/',
-                'Origin': self.base_url
-            })
+            # Pendekatan 2: Coba dengan rendering (simulasi browser)
+            result = self._try_browser_check(domains)
+            if result is not None:
+                return result
             
-            # Kirim request dengan retry
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = self.session.post(
-                        self.api_url,
-                        data=data,
-                        headers=api_headers,
-                        timeout=30,
-                        verify=False
-                    )
-                    
-                    if response.status_code == 200:
-                        return self.parse_api_response(response.text, domains)
-                    else:
-                        logger.warning(f"⚠️ Attempt {attempt+1}: HTTP {response.status_code}")
-                        if attempt < max_retries - 1:
-                            time.sleep(3)
-                            continue
-                            
-                except requests.exceptions.Timeout:
-                    logger.warning(f"⚠️ Attempt {attempt+1}: Timeout")
-                    if attempt < max_retries - 1:
-                        time.sleep(3)
-                        continue
-                except Exception as e:
-                    logger.error(f"❌ Attempt {attempt+1}: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(3)
-                        continue
+            # Pendekatan 3: Coba dengan payload yang umum
+            result = self._try_generic_check(domains)
+            if result is not None:
+                return result
             
+            logger.error("❌ All approaches failed")
             return []
-                
+            
         except Exception as e:
             logger.error(f"❌ Error checking batch: {e}")
             return []
     
-    def parse_api_response(self, response_text, original_domains):
+    def _try_api_check(self, domains):
+        """Coba cek via API"""
+        try:
+            # Coba beberapa endpoint yang mungkin
+            possible_endpoints = [
+                f"{self.base_url}/api/check",
+                f"{self.base_url}/api/domains",
+                f"{self.base_url}/api/trustpositif",
+                "https://bshpeqeoxfuattnzoyih.supabase.co/functions/v1/check-domain",
+                "https://bshpeqeoxfuattnzoyih.supabase.co/functions/v1/trustpositif",
+            ]
+            
+            for endpoint in possible_endpoints:
+                try:
+                    logger.info(f"🔄 Trying API: {endpoint}")
+                    
+                    # Payload yang mungkin
+                    payloads = [
+                        {'domains': domains},
+                        {'domain': domains[0] if domains else ''},
+                        {'domains': '\n'.join(domains)},
+                        {'urls': domains},
+                    ]
+                    
+                    for payload in payloads:
+                        try:
+                            response = self.session.post(
+                                endpoint,
+                                json=payload,
+                                headers={
+                                    **self.headers,
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json',
+                                },
+                                timeout=15,
+                                verify=False
+                            )
+                            
+                            if response.status_code == 200:
+                                logger.info(f"✅ API success: {endpoint}")
+                                return self._parse_api_response(response.text, domains)
+                                
+                        except Exception as e:
+                            continue
+                            
+                except Exception as e:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ API check error: {e}")
+            return None
+    
+    def _try_browser_check(self, domains):
+        """Simulasi browser check dengan selenium atau requests-html"""
+        try:
+            # Karena ini SPA React, mungkin perlu JavaScript execution
+            # Pendekatan: coba langsung ke halaman dengan parameter
+            for domain in domains:
+                try:
+                    url = f"{self.base_url}/check?domain={domain}"
+                    response = self.session.get(
+                        url,
+                        headers=self.headers,
+                        timeout=15,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        # Parse hasil dari HTML
+                        return self._parse_html_response(response.text, domains)
+                        
+                except Exception as e:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Browser check error: {e}")
+            return None
+    
+    def _try_generic_check(self, domains):
+        """Try generic check using common patterns"""
+        try:
+            # Coba dengan form data seperti TrustPositif
+            data = {
+                'csrf_token': self.csrf_token,
+                'name': '\n'.join(domains)
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/check",
+                data=data,
+                headers={
+                    **self.headers,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                timeout=15,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                return self._parse_html_response(response.text, domains)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Generic check error: {e}")
+            return None
+    
+    def _parse_api_response(self, response_text, original_domains):
         """Parse API response"""
         blocked_domains = []
         
         try:
-            result = json.loads(response_text)
+            data = json.loads(response_text)
             
-            if 'values' in result:
-                domain_status_map = {}
+            # Coba berbagai format response yang mungkin
+            if isinstance(data, dict):
+                # Format 1: {'data': [{'domain': 'x', 'status': 'blocked'}]}
+                if 'data' in data:
+                    for item in data['data']:
+                        if isinstance(item, dict):
+                            domain = item.get('domain', '').lower()
+                            status = item.get('status', '')
+                            if status and status.lower() not in ['ok', 'clean', 'not blocked', 'tidak ada']:
+                                blocked_domains.append(f"{domain} (terblokir)")
                 
-                for item in result['values']:
-                    if isinstance(item, dict):
-                        domain = item.get('Domain', '').strip().lower()
-                        status = item.get('Status', '').strip()
-                        if domain:
-                            domain_status_map[domain] = status
+                # Format 2: {'domains': [{'domain': 'x', 'blocked': True}]}
+                elif 'domains' in data:
+                    for item in data['domains']:
+                        if isinstance(item, dict):
+                            domain = item.get('domain', '').lower()
+                            blocked = item.get('blocked', False)
+                            if blocked:
+                                blocked_domains.append(f"{domain} (terblokir)")
                 
+                # Format 3: {'result': [{'domain': 'x', 'status': 'blocked'}]}
+                elif 'result' in data:
+                    for item in data['result']:
+                        if isinstance(item, dict):
+                            domain = item.get('domain', '').lower()
+                            status = item.get('status', '')
+                            if status and status.lower() in ['blocked', 'terblokir']:
+                                blocked_domains.append(f"{domain} (terblokir)")
+            
+            # Jika tidak ada yang terdeteksi, asumsi aman
+            if not blocked_domains:
                 for domain in original_domains:
-                    domain_lower = domain.lower()
-                    status = domain_status_map.get(domain_lower, '')
-                    
-                    if status == 'Tidak Ada':
-                        logger.info(f"✅ {domain}: Aman")
-                    elif status:
-                        blocked_domains.append(f"{domain} ({status})")
-                        logger.warning(f"🚫 {domain}: {status}")
-                    else:
+                    logger.info(f"✅ {domain}: Aman (tidak terdeteksi)")
+            
+            return blocked_domains
+            
+        except Exception as e:
+            logger.error(f"❌ API parse error: {e}")
+            return []
+    
+    def _parse_html_response(self, html, domains):
+        """Parse HTML response using BeautifulSoup or regex"""
+        blocked_domains = []
+        
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Cari di berbagai elemen yang mungkin menampilkan hasil
+            # 1. Cari di div dengan class tertentu
+            result_divs = soup.find_all(['div', 'span', 'p'], class_=re.compile(r'(result|status|domain|blocked)'))
+            for div in result_divs:
+                text = div.text.lower()
+                for domain in domains:
+                    if domain.lower() in text:
+                        if 'blocked' in text or 'terblokir' in text or 'nawala' in text:
+                            blocked_domains.append(f"{domain} (terdeteksi di HTML)")
+                            break
+            
+            # 2. Cari pattern di teks
+            html_text = soup.text.lower()
+            for domain in domains:
+                domain_lower = domain.lower()
+                if domain_lower in html_text:
+                    # Cari konteks sekitar
+                    pattern = f'.{{0,100}}{re.escape(domain_lower)}.{{0,100}}(blocked|terblokir|nawala).{{0,100}}'
+                    match = re.search(pattern, html_text, re.IGNORECASE)
+                    if match:
+                        blocked_domains.append(f"{domain} (terdeteksi)")
+            
+            # Jika tidak ada yang terdeteksi, asumsi aman
+            if not blocked_domains:
+                for domain in domains:
+                    if domain.lower() not in html_text:
                         logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
             
             return blocked_domains
             
-        except json.JSONDecodeError:
-            return self.parse_html_response(response_text, original_domains)
-        except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
-            return []
-    
-    def parse_html_response(self, html, domains):
-        """Parse HTML response using regex"""
-        blocked_domains = []
-        
-        try:
-            # Cari tabel dengan regex
-            table_pattern = r'<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>'
-            matches = re.findall(table_pattern, html, re.IGNORECASE | re.DOTALL)
-            
-            for match in matches:
-                domain = match[0].strip().lower()
-                status = match[1].strip()
-                
-                if domain and status and status.lower() != 'tidak ada':
-                    for original_domain in domains:
-                        if original_domain.lower() == domain:
-                            blocked_domains.append(f"{original_domain} ({status})")
-                            logger.warning(f"🚫 HTML: {original_domain} -> {status}")
-                            break
-            
-            if not blocked_domains:
-                for domain in domains:
-                    domain_lower = domain.lower()
-                    if domain_lower in html.lower():
-                        pattern = f'{re.escape(domain_lower)}.*?<td[^>]*>(.*?)</td>'
-                        match = re.search(pattern, html.lower(), re.DOTALL)
-                        if match:
-                            status = match.group(1).strip()
-                            if status and status != 'tidak ada':
-                                blocked_domains.append(f"{domain} ({status})")
-                                logger.warning(f"🚫 HTML: {domain} -> {status}")
-        
         except Exception as e:
             logger.error(f"❌ HTML parse error: {e}")
-        
-        return blocked_domains
+            return []
     
     def check_all_domains(self, domains):
         """Cek semua domain dengan batch 5"""
@@ -295,65 +393,6 @@ class TrustPositifChecker:
         except Exception as e:
             logger.error(f"❌ Error checking all domains: {e}")
             return []
-
-def test_proxy(proxy_config):
-    """Test apakah proxy bisa mengakses TrustPositif"""
-    try:
-        session = requests.Session()
-        session.proxies.update(proxy_config)
-        
-        response = session.get(
-            "https://trustpositif.komdigi.go.id/",
-            timeout=15,
-            verify=False,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        )
-        
-        if response.status_code == 200 and 'TrustPositif' in response.text:
-            logger.info(f"✅ Proxy BERHASIL: {proxy_config.get('http', 'unknown')}")
-            return True
-        else:
-            logger.warning(f"❌ Proxy GAGAL: {proxy_config.get('http', 'unknown')} - Status: {response.status_code}")
-            return False
-            
-    except Exception as e:
-        logger.warning(f"❌ Proxy GAGAL: {proxy_config.get('http', 'unknown')} - {str(e)[:50]}")
-        return False
-
-def find_working_proxy():
-    """Cari proxy yang bekerja"""
-    logger.info("🔍 Mencari proxy yang bekerja...")
-    
-    # Coba tanpa proxy dulu
-    logger.info("🔄 Mencoba koneksi langsung...")
-    try:
-        response = requests.get(
-            "https://trustpositif.komdigi.go.id/",
-            timeout=15,
-            verify=False,
-            headers={'User-Agent': 'Mozilla/5.0'}
-        )
-        if response.status_code == 200 and 'TrustPositif' in response.text:
-            logger.info("✅ Koneksi langsung BERHASIL!")
-            return None
-    except:
-        pass
-    
-    # Coba semua proxy
-    for host, port, username, password in PROXY_LIST:
-        proxy_dict = get_proxy_dict(host, port, username, password)
-        logger.info(f"🔄 Mencoba proxy: {host}:{port}")
-        
-        if test_proxy(proxy_dict):
-            return proxy_dict
-        
-        # Delay antar percobaan
-        time.sleep(1)
-    
-    logger.error("❌ Tidak ada proxy yang bekerja!")
-    return None
 
 def baca_domain():
     """Baca domain dari file domain.txt"""
@@ -390,7 +429,7 @@ def baca_domain():
         return []
 
 # ============================================
-# FUNGSI TELEGRAM
+# FUNGSI TELEGRAM (Sama seperti sebelumnya)
 # ============================================
 
 async def kirim_status():
@@ -401,12 +440,12 @@ async def kirim_status():
         domain_count = len(domains)
         
         message = (
-            "🤖 *TrustPositif Monitoring Bot*\n\n"
+            "🤖 *Nawala.asia Monitoring Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Batch:** 5 domain/request\n"
-            f"🔑 **Proxy:** {'Menggunakan proxy' if working_proxy else 'Langsung'}\n\n"
+            f"🌐 **Sumber:** Nawala.asia\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -452,6 +491,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
+                "_Sumber: Nawala.asia_"
             )
             
             if len(message) > 4096:
@@ -488,7 +528,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: trustpositif.komdigi.go.id_"
+                    "_Sumber: Nawala.asia_"
                 )
             
             await application.bot.send_message(
@@ -509,7 +549,7 @@ async def cek_domain_job():
     """Job untuk mengecek domain"""
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF KOMINFO")
+        logger.info("🔄 MEMULAI PEMERIKSAAN NAWALA.ASIA")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -519,8 +559,7 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        # Gunakan proxy yang sudah ditemukan
-        checker = TrustPositifChecker(working_proxy)
+        checker = NawalaChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -558,22 +597,12 @@ async def schedule_runner():
 
 async def main():
     """Main function"""
-    global working_proxy
-    
     print("\n" + "=" * 60)
-    print("🚀 TRUSTPOSITIF KOMINFO DOMAIN MONITORING BOT")
+    print("🚀 NAWALA.ASIA DOMAIN MONITORING BOT")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    
-    # Cari proxy yang bekerja
-    working_proxy = find_working_proxy()
-    
-    if working_proxy:
-        logger.info(f"✅ Proxy ditemukan: {working_proxy.get('http', 'unknown')}")
-    else:
-        logger.warning("⚠️ Tidak ada proxy yang bekerja, mencoba koneksi langsung...")
-        working_proxy = None
+    logger.info("🌐 Source: Nawala.asia (TrustPositif mirror)")
     
     await kirim_status()
     
@@ -592,12 +621,10 @@ async def main():
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
     logger.info("📍 Batch size: 5 domains per request")
+    logger.info("📍 Source: Nawala.asia")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
-
-# Global variable
-working_proxy = None
 
 if __name__ == "__main__":
     try:
@@ -607,7 +634,7 @@ if __name__ == "__main__":
         logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
     except ImportError as e:
         logger.error(f"❌ Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot")
+        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot beautifulsoup4")
         sys.exit(1)
     
     try:
