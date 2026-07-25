@@ -6,7 +6,6 @@ import logging
 import schedule
 import socket
 import struct
-import socks
 from telegram.ext import Application
 from datetime import datetime
 import requests
@@ -26,37 +25,9 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Proxy configuration
-PROXY_HOST = "193.5.64.24"
-PROXY_PORT = 59101  # SOCKS5
-PROXY_USERNAME = "pulsaslot1888"
-PROXY_PASSWORD = "b3Kft6IMwG"
-
 if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
-
-# Setup SOCKS5 proxy untuk semua koneksi socket
-try:
-    socks.set_default_proxy(
-        socks.SOCKS5,
-        PROXY_HOST,
-        PROXY_PORT,
-        username=PROXY_USERNAME,
-        password=PROXY_PASSWORD
-    )
-    # Patch socket untuk menggunakan SOCKS5
-    socket.socket = socks.socksocket
-    logger.info(f"✅ SOCKS5 proxy di-set: {PROXY_HOST}:{PROXY_PORT}")
-except Exception as e:
-    logger.error(f"❌ Gagal setup SOCKS5: {e}")
-    sys.exit(1)
-
-# Setup proxy untuk requests
-proxies = {
-    'http': f'socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}',
-    'https': f'socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}',
-}
 
 # Bot setup
 try:
@@ -66,65 +37,53 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-class NawalaDNSChecker:
+class MultiISPDNSChecker:
     def __init__(self):
-        # DNS server Nawala (Kominfo)
+        # DNS Server ISP Indonesia
         self.dns_servers = [
-            ("180.131.144.144", 53),
-            ("180.131.145.145", 53),
+            ("198.0.0.1", 53, "Telkomsel"),           # Telkomsel
+            ("180.131.144.144", 53, "Nawala"),        # Nawala Kominfo
+            ("180.131.145.145", 53, "Nawala"),        # Nawala Kominfo
+            ("118.98.44.10", 53, "IndiHome"),         # IndiHome
+            ("103.12.160.2", 53, "First Media"),      # First Media
+            ("202.152.2.2", 53, "MyRepublic"),        # MyRepublic
         ]
-        # Timeout per query
-        self.timeout = 5
         
-        # IP yang menandakan domain diblokir (Nawala)
+        # IP yang menandakan domain diblokir
         self.blocked_ips = [
-            "180.131.144.144",
-            "180.131.145.145",
-            "114.127.223.16",  # IndiHome
+            "198.0.0.1",           # Telkomsel
+            "180.131.144.144",     # Nawala
+            "180.131.145.145",     # Nawala
+            "114.127.223.16",      # IndiHome
+            "36.86.63.182",        # IndiHome
             "0.0.0.0",
         ]
+        
+        self.timeout = 5
     
     def _build_dns_query(self, domain):
-        """Bangun DNS query packet untuk domain"""
-        # Transaction ID
+        """Bangun DNS query packet"""
         transaction_id = b'\xaa\xaa'
-        
-        # Flags: standard query, recursion desired
         flags = b'\x01\x00'
-        
-        # Question count: 1
         qdcount = b'\x00\x01'
-        
-        # Answer count: 0
         ancount = b'\x00\x00'
-        
-        # Authority count: 0
         nscount = b'\x00\x00'
-        
-        # Additional count: 0
         arcount = b'\x00\x00'
         
-        # Build query name (domain)
         qname = b''
         for part in domain.split('.'):
             qname += bytes([len(part)]) + part.encode()
         qname += b'\x00'
         
-        # Query type: A (1)
-        qtype = b'\x00\x01'
+        qtype = b'\x00\x01'  # A record
+        qclass = b'\x00\x01'  # IN
         
-        # Query class: IN (1)
-        qclass = b'\x00\x01'
-        
-        # Build full packet
         packet = transaction_id + flags + qdcount + ancount + nscount + arcount + qname + qtype + qclass
-        
         return packet
     
     def _parse_dns_response(self, data):
-        """Parse DNS response untuk deteksi blokir"""
+        """Parse DNS response"""
         try:
-            # Cek apakah ini response
             qr = (data[2] & 0x80) != 0
             if not qr:
                 return None, None
@@ -132,62 +91,56 @@ class NawalaDNSChecker:
             # Cek flag TC (Truncated) - tanda blokir
             tc_flag = (data[2] & 0x02) != 0
             if tc_flag:
-                return "BLOCKED", None
+                return "BLOCKED_TC", None
             
             # Cek response code
             response_code = data[3] & 0x0F
             
-            # NXDOMAIN (3) = domain tidak ada = BLOKIR
+            # NXDOMAIN = domain tidak ada (bisa jadi blokir)
             if response_code == 3:
-                return "BLOCKED", None
+                return "BLOCKED_NX", None
             
-            # NOERROR (0) = domain ada
+            # NOERROR = domain ada
             if response_code == 0:
-                # Dapatkan jumlah answer
                 answer_count = struct.unpack('>H', data[6:8])[0]
                 
                 if answer_count > 0:
-                    # Coba ekstrak IP address dari answer
-                    ip_addresses = self._extract_ips_from_response(data)
+                    ips = self._extract_ips(data)
                     
                     # Cek apakah IP termasuk IP blokir
-                    for ip in ip_addresses:
+                    for ip in ips:
                         if ip in self.blocked_ips:
                             return "BLOCKED_IP", ip
                     
-                    return "RESOLVED", ip_addresses[0] if ip_addresses else None
+                    return "RESOLVED", ips[0] if ips else None
                 else:
                     return "NO_RECORD", None
             
             return f"ERROR_{response_code}", None
             
         except Exception as e:
-            logger.debug(f"Parse error: {e}")
             return "PARSE_ERROR", None
     
-    def _extract_ips_from_response(self, data):
-        """Ekstrak IP address dari DNS response"""
+    def _extract_ips(self, data):
+        """Ekstrak IP dari DNS response"""
         ips = []
         try:
-            # Cari di answer section
-            # Skip header (12 bytes)
             pos = 12
             
-            # Skip question section
+            # Skip question
             while pos < len(data):
                 if data[pos] == 0:
-                    pos += 5  # Skip null + qtype + qclass
+                    pos += 5
                     break
-                if data[pos] & 0xC0:  # Pointer
+                if data[pos] & 0xC0:
                     pos += 2
                     break
                 pos += data[pos] + 1
             
-            # Parse answer section
+            # Parse answer
             answer_count = struct.unpack('>H', data[6:8])[0]
             
             for _ in range(answer_count):
-                # Skip name (pointer atau label)
                 if data[pos] & 0xC0:
                     pos += 2
                 else:
@@ -195,17 +148,13 @@ class NawalaDNSChecker:
                         pos += data[pos] + 1
                     pos += 1
                 
-                # Type, Class, TTL, Data Length
                 qtype = struct.unpack('>H', data[pos:pos+2])[0]
                 pos += 2
-                qclass = struct.unpack('>H', data[pos:pos+2])[0]
-                pos += 2
-                ttl = struct.unpack('>I', data[pos:pos+4])[0]
-                pos += 4
+                pos += 2  # class
+                pos += 4  # TTL
                 data_len = struct.unpack('>H', data[pos:pos+2])[0]
                 pos += 2
                 
-                # Jika type A (1), ekstrak IP
                 if qtype == 1 and data_len == 4:
                     ip = f"{data[pos]}.{data[pos+1]}.{data[pos+2]}.{data[pos+3]}"
                     ips.append(ip)
@@ -213,63 +162,51 @@ class NawalaDNSChecker:
                 pos += data_len
             
         except Exception as e:
-            logger.debug(f"Extract IP error: {e}")
+            pass
         
         return ips
     
     def check_via_dns(self, domain):
-        """Cek domain via DNS query melalui proxy SOCKS5"""
-        try:
-            # Build DNS query
-            query = self._build_dns_query(domain)
-            
-            # Coba ke semua DNS server
-            for dns_server, dns_port in self.dns_servers:
-                try:
-                    # Buat socket melalui SOCKS5 proxy
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.settimeout(self.timeout)
-                    
-                    # Kirim query ke DNS server
-                    sock.sendto(query, (dns_server, dns_port))
-                    
-                    # Terima response
-                    data, addr = sock.recvfrom(512)
-                    sock.close()
-                    
-                    # Parse response
-                    status, ip = self._parse_dns_response(data)
-                    
-                    logger.debug(f"DNS {dns_server}: {domain} -> {status} ({ip})")
-                    
-                    if status == "BLOCKED" or status == "BLOCKED_IP":
-                        return True
-                    elif status == "RESOLVED" or status == "NO_RECORD":
-                        return False
-                    # Jika error, coba server lain
-                    
-                except socket.timeout:
-                    logger.debug(f"DNS {dns_server} timeout untuk {domain}")
-                    continue
-                except Exception as e:
-                    logger.debug(f"DNS {dns_server} error: {e}")
-                    continue
-            
-            # Jika semua server gagal
-            logger.warning(f"⚠️ Semua DNS server gagal untuk {domain}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"DNS error untuk {domain}: {e}")
-            return False
+        """Cek domain via DNS query ke semua ISP"""
+        results = {}
+        
+        for dns_server, dns_port, isp_name in self.dns_servers:
+            try:
+                query = self._build_dns_query(domain)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(self.timeout)
+                sock.sendto(query, (dns_server, dns_port))
+                data, addr = sock.recvfrom(512)
+                sock.close()
+                
+                status, ip = self._parse_dns_response(data)
+                results[isp_name] = {
+                    'status': status,
+                    'ip': ip,
+                    'server': dns_server
+                }
+                
+                logger.debug(f"{isp_name} ({dns_server}): {domain} -> {status} ({ip})")
+                
+                # Jika terdeteksi blokir, langsung return True
+                if status in ["BLOCKED_TC", "BLOCKED_NX", "BLOCKED_IP"]:
+                    return True, isp_name, status
+                
+            except socket.timeout:
+                results[isp_name] = {'status': 'TIMEOUT', 'ip': None, 'server': dns_server}
+                continue
+            except Exception as e:
+                results[isp_name] = {'status': f'ERROR: {str(e)[:30]}', 'ip': None, 'server': dns_server}
+                continue
+        
+        # Jika semua server mengembalikan RESOLVED atau NO_RECORD, domain aman
+        return False, None, None
     
     def check_via_http_fallback(self, domain):
-        """Fallback: cek via HTTP dengan proxy"""
+        """Fallback: cek via HTTP API"""
         try:
-            session = requests.Session()
-            session.proxies.update(proxies)
-            
-            response = session.post(
+            # Coba ke trustpositif.id
+            response = requests.post(
                 "https://trustpositif.id/checker/check",
                 json={'domains': [domain]},
                 headers={
@@ -294,27 +231,27 @@ class NawalaDNSChecker:
             return False
     
     def check_single_domain(self, domain):
-        """Cek 1 domain"""
+        """Cek 1 domain dengan semua metode"""
         try:
             logger.info(f"🔍 Checking: {domain}")
             
-            # Metode 1: DNS query via SOCKS5
-            is_blocked = self.check_via_dns(domain)
+            # Metode 1: DNS via Multi-ISP
+            is_blocked, isp_name, status = self.check_via_dns(domain)
             
             if is_blocked:
-                logger.warning(f"🚫 {domain}: DIBLOKIR (DNS)")
+                logger.warning(f"🚫 {domain}: DIBLOKIR (DNS) - {isp_name} ({status})")
                 return True
             
-            # Metode 2: HTTP fallback jika DNS gagal
-            logger.info(f"📡 DNS tidak mendeteksi blokir, coba HTTP fallback...")
+            # Metode 2: HTTP fallback
+            logger.info(f"📡 Coba HTTP fallback untuk {domain}...")
             is_blocked = self.check_via_http_fallback(domain)
             
             if is_blocked:
                 logger.warning(f"🚫 {domain}: DIBLOKIR (HTTP Fallback)")
                 return True
-            else:
-                logger.info(f"✅ {domain}: AMAN")
-                return False
+            
+            logger.info(f"✅ {domain}: AMAN")
+            return False
                 
         except Exception as e:
             logger.error(f"Error checking {domain}: {e}")
@@ -399,13 +336,12 @@ async def kirim_status():
         domain_count = len(domains)
         
         message = (
-            "🤖 *Nawala DNS Checker Bot*\n\n"
+            "🤖 *Multi-ISP DNS Checker Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Mode:** DNS Query via SOCKS5 Proxy\n"
-            f"🔑 **Proxy:** {PROXY_HOST}:{PROXY_PORT}\n"
-            f"🌐 **DNS Server:** 180.131.144.144, 180.131.145.145\n\n"
+            f"🔢 **Mode:** Multi-ISP DNS Query\n"
+            f"🌐 **DNS Server:** Telkomsel, Nawala, IndiHome, First Media, MyRepublic\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -450,7 +386,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: DNS Server Nawala via SOCKS5_"
+                "_Sumber: Multi-ISP DNS Checker_"
             )
             
             if len(message) > 4096:
@@ -486,7 +422,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: DNS Server Nawala via SOCKS5_"
+                    "_Sumber: Multi-ISP DNS Checker_"
                 )
             
             await application.bot.send_message(
@@ -506,8 +442,8 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
 async def cek_domain_job():
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN DNS NAWALA")
-        logger.info(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
+        logger.info("🔄 MEMULAI PEMERIKSAAN MULTI-ISP DNS")
+        logger.info("🌐 DNS Server: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -517,7 +453,7 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = NawalaDNSChecker()
+        checker = MultiISPDNSChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -553,13 +489,13 @@ async def schedule_runner():
 
 async def main():
     print("\n" + "=" * 60)
-    print("🚀 NAWALA DNS CHECKER BOT")
-    print(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
-    print("📌 Mode: DNS Query ke Server Nawala")
+    print("🚀 MULTI-ISP DNS CHECKER BOT")
+    print("📌 Mode: DNS Query ke 5 ISP Indonesia")
+    print("🌐 DNS: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info(f"🌐 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
+    logger.info("🌐 DNS Server: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
     
     await kirim_status()
     
@@ -576,7 +512,7 @@ async def main():
     
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
-    logger.info("📍 Mode: DNS Query via SOCKS5")
+    logger.info("📍 Mode: Multi-ISP DNS Query")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
@@ -589,7 +525,7 @@ if __name__ == "__main__":
         logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
     except ImportError as e:
         logger.error(f"Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot PySocks")
+        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot")
         sys.exit(1)
     
     try:
