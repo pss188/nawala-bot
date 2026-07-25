@@ -1,1 +1,1 @@
-worker: python main.py
+worker: go run main.go
