@@ -4,12 +4,13 @@ import time
 import asyncio
 import logging
 import schedule
-import socket
-import struct
+import json
 from telegram.ext import Application
 from datetime import datetime
 import requests
 import urllib3
+import socks
+import socket
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -25,9 +26,35 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# Proxy configuration
+PROXY_HOST = "193.5.64.24"
+PROXY_PORT = 59101  # SOCKS5
+PROXY_USERNAME = "pulsaslot1888"
+PROXY_PASSWORD = "b3Kft6IMwG"
+
 if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
+
+# Setup SOCKS5 proxy
+try:
+    socks.set_default_proxy(
+        socks.SOCKS5,
+        PROXY_HOST,
+        PROXY_PORT,
+        username=PROXY_USERNAME,
+        password=PROXY_PASSWORD
+    )
+    socket.socket = socks.socksocket
+    logger.info(f"✅ SOCKS5 proxy di-set: {PROXY_HOST}:{PROXY_PORT}")
+except Exception as e:
+    logger.error(f"❌ Gagal setup SOCKS5: {e}")
+
+# Setup proxy untuk requests
+proxies = {
+    'http': f'socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}',
+    'https': f'socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}',
+}
 
 # Bot setup
 try:
@@ -37,225 +64,71 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-class MultiISPDNSChecker:
+class TrustPositifAPIChecker:
     def __init__(self):
-        # DNS Server ISP Indonesia
-        self.dns_servers = [
-            ("198.0.0.1", 53, "Telkomsel"),           # Telkomsel
-            ("180.131.144.144", 53, "Nawala"),        # Nawala Kominfo
-            ("180.131.145.145", 53, "Nawala"),        # Nawala Kominfo
-            ("118.98.44.10", 53, "IndiHome"),         # IndiHome
-            ("103.12.160.2", 53, "First Media"),      # First Media
-            ("202.152.2.2", 53, "MyRepublic"),        # MyRepublic
-        ]
+        self.session = requests.Session()
+        self.session.proxies.update(proxies)
         
-        # IP yang menandakan domain diblokir
-        self.blocked_ips = [
-            "198.0.0.1",           # Telkomsel
-            "180.131.144.144",     # Nawala
-            "180.131.145.145",     # Nawala
-            "114.127.223.16",      # IndiHome
-            "36.86.63.182",        # IndiHome
-            "0.0.0.0",
-        ]
+        # API Endpoint TrustPositif
+        self.api_url = "https://trustpositif.komdigi.go.id/api/check"
         
-        self.timeout = 5
+        # Headers untuk API
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
     
-    def _build_dns_query(self, domain):
-        """Bangun DNS query packet"""
-        transaction_id = b'\xaa\xaa'
-        flags = b'\x01\x00'
-        qdcount = b'\x00\x01'
-        ancount = b'\x00\x00'
-        nscount = b'\x00\x00'
-        arcount = b'\x00\x00'
-        
-        qname = b''
-        for part in domain.split('.'):
-            qname += bytes([len(part)]) + part.encode()
-        qname += b'\x00'
-        
-        qtype = b'\x00\x01'  # A record
-        qclass = b'\x00\x01'  # IN
-        
-        packet = transaction_id + flags + qdcount + ancount + nscount + arcount + qname + qtype + qclass
-        return packet
-    
-    def _parse_dns_response(self, data):
-        """Parse DNS response"""
+    def check_single_domain(self, domain):
+        """Cek 1 domain via TrustPositif API"""
         try:
-            qr = (data[2] & 0x80) != 0
-            if not qr:
-                return None, None
+            logger.info(f"🔍 Checking: {domain}")
             
-            # Cek flag TC (Truncated) - tanda blokir
-            tc_flag = (data[2] & 0x02) != 0
-            if tc_flag:
-                return "BLOCKED_TC", None
-            
-            # Cek response code
-            response_code = data[3] & 0x0F
-            
-            # NXDOMAIN = domain tidak ada (bisa jadi blokir)
-            if response_code == 3:
-                return "BLOCKED_NX", None
-            
-            # NOERROR = domain ada
-            if response_code == 0:
-                answer_count = struct.unpack('>H', data[6:8])[0]
-                
-                if answer_count > 0:
-                    ips = self._extract_ips(data)
-                    
-                    # Cek apakah IP termasuk IP blokir
-                    for ip in ips:
-                        if ip in self.blocked_ips:
-                            return "BLOCKED_IP", ip
-                    
-                    return "RESOLVED", ips[0] if ips else None
-                else:
-                    return "NO_RECORD", None
-            
-            return f"ERROR_{response_code}", None
-            
-        except Exception as e:
-            return "PARSE_ERROR", None
-    
-    def _extract_ips(self, data):
-        """Ekstrak IP dari DNS response"""
-        ips = []
-        try:
-            pos = 12
-            
-            # Skip question
-            while pos < len(data):
-                if data[pos] == 0:
-                    pos += 5
-                    break
-                if data[pos] & 0xC0:
-                    pos += 2
-                    break
-                pos += data[pos] + 1
-            
-            # Parse answer
-            answer_count = struct.unpack('>H', data[6:8])[0]
-            
-            for _ in range(answer_count):
-                if data[pos] & 0xC0:
-                    pos += 2
-                else:
-                    while data[pos] != 0:
-                        pos += data[pos] + 1
-                    pos += 1
-                
-                qtype = struct.unpack('>H', data[pos:pos+2])[0]
-                pos += 2
-                pos += 2  # class
-                pos += 4  # TTL
-                data_len = struct.unpack('>H', data[pos:pos+2])[0]
-                pos += 2
-                
-                if qtype == 1 and data_len == 4:
-                    ip = f"{data[pos]}.{data[pos+1]}.{data[pos+2]}.{data[pos+3]}"
-                    ips.append(ip)
-                
-                pos += data_len
-            
-        except Exception as e:
-            pass
-        
-        return ips
-    
-    def check_via_dns(self, domain):
-        """Cek domain via DNS query ke semua ISP"""
-        results = {}
-        
-        for dns_server, dns_port, isp_name in self.dns_servers:
-            try:
-                query = self._build_dns_query(domain)
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.settimeout(self.timeout)
-                sock.sendto(query, (dns_server, dns_port))
-                data, addr = sock.recvfrom(512)
-                sock.close()
-                
-                status, ip = self._parse_dns_response(data)
-                results[isp_name] = {
-                    'status': status,
-                    'ip': ip,
-                    'server': dns_server
-                }
-                
-                logger.debug(f"{isp_name} ({dns_server}): {domain} -> {status} ({ip})")
-                
-                # Jika terdeteksi blokir, langsung return True
-                if status in ["BLOCKED_TC", "BLOCKED_NX", "BLOCKED_IP"]:
-                    return True, isp_name, status
-                
-            except socket.timeout:
-                results[isp_name] = {'status': 'TIMEOUT', 'ip': None, 'server': dns_server}
-                continue
-            except Exception as e:
-                results[isp_name] = {'status': f'ERROR: {str(e)[:30]}', 'ip': None, 'server': dns_server}
-                continue
-        
-        # Jika semua server mengembalikan RESOLVED atau NO_RECORD, domain aman
-        return False, None, None
-    
-    def check_via_http_fallback(self, domain):
-        """Fallback: cek via HTTP API"""
-        try:
-            # Coba ke trustpositif.id
-            response = requests.post(
-                "https://trustpositif.id/checker/check",
-                json={'domains': [domain]},
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Content-Type': 'application/json',
-                },
+            response = self.session.get(
+                self.api_url,
+                params={'domain': domain},
+                headers=self.headers,
                 timeout=15,
                 verify=False
             )
             
             if response.status_code == 200:
                 data = response.json()
-                if data.get('success'):
-                    results = data.get('results', [])
-                    for result in results:
-                        if result.get('Blocked') or result.get('blocked'):
-                            return True
-            return False
-            
-        except Exception as e:
-            logger.debug(f"HTTP fallback error: {e}")
-            return False
-    
-    def check_single_domain(self, domain):
-        """Cek 1 domain dengan semua metode"""
-        try:
-            logger.info(f"🔍 Checking: {domain}")
-            
-            # Metode 1: DNS via Multi-ISP
-            is_blocked, isp_name, status = self.check_via_dns(domain)
-            
-            if is_blocked:
-                logger.warning(f"🚫 {domain}: DIBLOKIR (DNS) - {isp_name} ({status})")
-                return True
-            
-            # Metode 2: HTTP fallback
-            logger.info(f"📡 Coba HTTP fallback untuk {domain}...")
-            is_blocked = self.check_via_http_fallback(domain)
-            
-            if is_blocked:
-                logger.warning(f"🚫 {domain}: DIBLOKIR (HTTP Fallback)")
-                return True
-            
-            logger.info(f"✅ {domain}: AMAN")
-            return False
+                logger.debug(f"API Response: {json.dumps(data, indent=2)}")
                 
+                # Parse response berdasarkan format API
+                status = data.get('status', '').lower()
+                
+                if status == 'blocked':
+                    logger.warning(f"🚫 {domain}: DIBLOKIR")
+                    return True
+                elif status == 'not blocked' or status == 'not_blocked' or status == 'aman':
+                    logger.info(f"✅ {domain}: AMAN")
+                    return False
+                else:
+                    # Coba cek field lain
+                    if data.get('blocked') or data.get('Blocked'):
+                        logger.warning(f"🚫 {domain}: DIBLOKIR")
+                        return True
+                    elif 'result' in data:
+                        result = data.get('result', {}).get('status', '').lower()
+                        if result == 'blocked':
+                            return True
+                    logger.info(f"✅ {domain}: AMAN (tidak terdeteksi)")
+                    return False
+            else:
+                logger.error(f"HTTP {response.status_code} - {response.text[:200]}")
+                return None
+                
+        except requests.exceptions.ProxyError as e:
+            logger.error(f"Proxy error: {e}")
+            return None
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout untuk {domain}")
+            return None
         except Exception as e:
-            logger.error(f"Error checking {domain}: {e}")
-            return False
+            logger.error(f"Error: {e}")
+            return None
     
     def check_all_domains(self, domains):
         """Cek semua domain satu per satu"""
@@ -274,11 +147,13 @@ class MultiISPDNSChecker:
                 
                 is_blocked = self.check_single_domain(domain)
                 
-                if is_blocked:
+                if is_blocked is True:
                     all_blocked.append(domain)
                     logger.warning(f"🚫 {domain}: TERBLOKIR")
-                else:
+                elif is_blocked is False:
                     logger.info(f"✅ {domain}: AMAN")
+                else:
+                    logger.warning(f"⚠️ {domain}: GAGAL (asumsi AMAN)")
                 
                 # Delay antar domain
                 if i < total:
@@ -336,12 +211,13 @@ async def kirim_status():
         domain_count = len(domains)
         
         message = (
-            "🤖 *Multi-ISP DNS Checker Bot*\n\n"
+            "🤖 *TrustPositif API Checker Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Mode:** Multi-ISP DNS Query\n"
-            f"🌐 **DNS Server:** Telkomsel, Nawala, IndiHome, First Media, MyRepublic\n\n"
+            f"🔢 **Mode:** TrustPositif API\n"
+            f"🔑 **Proxy:** SOCKS5 - {PROXY_HOST}:{PROXY_PORT}\n"
+            f"🌐 **API:** trustpositif.komdigi.go.id\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -386,7 +262,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: Multi-ISP DNS Checker_"
+                "_Sumber: TrustPositif API (komdigi.go.id)_"
             )
             
             if len(message) > 4096:
@@ -422,7 +298,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: Multi-ISP DNS Checker_"
+                    "_Sumber: TrustPositif API (komdigi.go.id)_"
                 )
             
             await application.bot.send_message(
@@ -442,8 +318,8 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
 async def cek_domain_job():
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN MULTI-ISP DNS")
-        logger.info("🌐 DNS Server: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
+        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF API")
+        logger.info(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -453,7 +329,7 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = MultiISPDNSChecker()
+        checker = TrustPositifAPIChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -489,13 +365,14 @@ async def schedule_runner():
 
 async def main():
     print("\n" + "=" * 60)
-    print("🚀 MULTI-ISP DNS CHECKER BOT")
-    print("📌 Mode: DNS Query ke 5 ISP Indonesia")
-    print("🌐 DNS: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
+    print("🚀 TRUSTPOSITIF API CHECKER BOT")
+    print(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
+    print("📌 Mode: TrustPositif API")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🌐 DNS Server: Telkomsel, Nawala, IndiHome, First Media, MyRepublic")
+    logger.info(f"🌐 API: trustpositif.komdigi.go.id")
+    logger.info(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (SOCKS5)")
     
     await kirim_status()
     
@@ -512,7 +389,7 @@ async def main():
     
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
-    logger.info("📍 Mode: Multi-ISP DNS Query")
+    logger.info("📍 Mode: TrustPositif API + SOCKS5 Proxy")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
@@ -525,7 +402,7 @@ if __name__ == "__main__":
         logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
     except ImportError as e:
         logger.error(f"Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot")
+        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot PySocks")
         sys.exit(1)
     
     try:
