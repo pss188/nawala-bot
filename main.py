@@ -6,10 +6,14 @@ import logging
 import schedule
 import socket
 import struct
+import dns.resolver
+import dns.exception
+import dns.message
+import dns.query
 from telegram.ext import Application
 from datetime import datetime
-import urllib3
 import requests
+import urllib3
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -25,9 +29,30 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# Proxy configuration
+USE_PROXY = os.getenv("USE_PROXY", "false").lower() == "true"
+PROXY_HOST = os.getenv("PROXY_HOST", "")
+PROXY_PORT = os.getenv("PROXY_PORT", "")
+PROXY_USERNAME = os.getenv("PROXY_USERNAME", "")
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "")
+
 if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
+
+# Setup proxy untuk requests
+proxies = None
+if USE_PROXY and PROXY_HOST and PROXY_PORT:
+    proxy_url = f"http://{PROXY_HOST}:{PROXY_PORT}"
+    if PROXY_USERNAME and PROXY_PASSWORD:
+        proxy_url = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+    proxies = {
+        'http': proxy_url,
+        'https': proxy_url,
+    }
+    logger.info(f"🔑 Menggunakan proxy: {PROXY_HOST}:{PROXY_PORT}")
+else:
+    logger.info("🔓 Koneksi langsung (tanpa proxy)")
 
 # Bot setup
 try:
@@ -37,179 +62,122 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-class NawalaDNSChecker:
-    """
-    Cek domain dengan query langsung ke DNS server Nawala
-    Server DNS Nawala: 180.131.144.144 dan 180.131.145.145
-    """
+class NawalaChecker:
     def __init__(self):
-        # DNS server Nawala (Kominfo)
+        # DNS server Nawala
         self.dns_servers = [
             "180.131.144.144",
             "180.131.145.145",
         ]
-        # DNS port
-        self.dns_port = 53
-        # Timeout per query
-        self.timeout = 5
+        self.proxies = proxies
         
-    def _build_dns_query(self, domain):
-        """Bangun DNS query packet untuk domain"""
-        # Transaction ID (random)
-        transaction_id = b'\xaa\xaa'
+        # Setup DNS resolver dengan proxy support
+        self.resolver = dns.resolver.Resolver()
+        self.resolver.nameservers = self.dns_servers
+        self.resolver.timeout = 5
+        self.resolver.lifetime = 5
         
-        # Flags: standard query, recursion desired
-        flags = b'\x01\x00'
+        # Untuk DNS over TCP via proxy (jika diperlukan)
+        self.use_proxy_for_dns = USE_PROXY
         
-        # Question count: 1
-        qdcount = b'\x00\x01'
-        
-        # Answer count: 0
-        ancount = b'\x00\x00'
-        
-        # Authority count: 0
-        nscount = b'\x00\x00'
-        
-        # Additional count: 0
-        arcount = b'\x00\x00'
-        
-        # Build query name (domain)
-        qname = b''
-        for part in domain.split('.'):
-            qname += bytes([len(part)]) + part.encode()
-        qname += b'\x00'
-        
-        # Query type: A (1)
-        qtype = b'\x00\x01'
-        
-        # Query class: IN (1)
-        qclass = b'\x00\x01'
-        
-        # Build full packet
-        packet = transaction_id + flags + qdcount + ancount + nscount + arcount + qname + qtype + qclass
-        
-        return packet
-    
-    def _parse_dns_response(self, data):
-        """Parse DNS response untuk mendeteksi blokir"""
+    def check_via_dns(self, domain):
+        """Cek domain via DNS dengan dukungan proxy"""
         try:
-            # Cek response code (4 bits)
-            response_code = (data[3] & 0x0F)
+            logger.debug(f"DNS query untuk {domain}...")
             
-            # Jika response code = 3 (NXDOMAIN) - domain tidak ada
-            # Jika response code = 0 (NOERROR) - domain ada
-            # Domain terblokir biasanya mengembalikan response code 0 dengan alamat tertentu
-            # atau response code 3 dengan TC flag
-            
-            # Cek flag TC (Truncated) - ini tanda domain diblokir
-            tc_flag = (data[2] & 0x02) != 0
-            
-            # Cek response code
-            if response_code == 3:  # NXDOMAIN
-                return "NXDOMAIN"
-            elif tc_flag:
-                return "BLOCKED_TRUNCATED"
-            elif response_code == 0:
-                # Cek answer section
-                # Hitung jumlah answer
-                answer_count = struct.unpack('>H', data[6:8])[0]
-                if answer_count > 0:
-                    return "RESOLVED"
-                else:
-                    return "NO_RECORD"
-            else:
-                return f"ERROR_{response_code}"
-                
-        except Exception as e:
-            logger.error(f"Parse error: {e}")
-            return "PARSE_ERROR"
-    
-    def check_domain_via_dns(self, domain):
-        """Cek domain via DNS query langsung ke server Nawala"""
-        try:
-            # Build DNS query
-            query = self._build_dns_query(domain)
-            
-            # Coba ke semua DNS server
-            for dns_server in self.dns_servers:
+            # Jika menggunakan proxy, coba via TCP
+            if self.use_proxy_for_dns:
                 try:
-                    # Create UDP socket
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    sock.settimeout(self.timeout)
+                    # Build DNS query
+                    query = dns.message.make_query(domain, 'A')
                     
-                    # Send query
-                    sock.sendto(query, (dns_server, self.dns_port))
-                    
-                    # Receive response
-                    data, addr = sock.recvfrom(512)
-                    sock.close()
-                    
-                    # Parse response
-                    result = self._parse_dns_response(data)
-                    
-                    logger.debug(f"DNS {dns_server} -> {domain}: {result}")
-                    
-                    # Jika result adalah BLOCKED_TRUNCATED atau NXDOMAIN
-                    # atau RESOLVED dengan IP tertentu (ini domain tidak diblokir)
-                    if result == "BLOCKED_TRUNCATED":
-                        return "BLOCKED"
-                    elif result == "NXDOMAIN":
-                        return "BLOCKED"
-                    elif result == "RESOLVED":
-                        return "SAFE"
-                    elif result == "NO_RECORD":
-                        return "SAFE"
-                    
-                    # Jika tidak dapat menentukan, coba server lain
-                    
-                except socket.timeout:
-                    logger.debug(f"DNS {dns_server} timeout untuk {domain}")
-                    continue
+                    # Kirim via TCP ke DNS server
+                    for dns_server in self.dns_servers:
+                        try:
+                            # Gunakan socket dengan timeout
+                            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            sock.settimeout(5)
+                            
+                            # Connect ke DNS server
+                            sock.connect((dns_server, 53))
+                            
+                            # Kirim query
+                            wire_data = query.to_wire()
+                            sock.send(wire_data)
+                            
+                            # Receive response
+                            response_data = sock.recv(4096)
+                            sock.close()
+                            
+                            # Parse response
+                            response = dns.message.from_wire(response_data)
+                            
+                            # Cek status
+                            if response.rcode() == dns.rcode.NXDOMAIN:
+                                return "BLOCKED"
+                            elif response.rcode() == dns.rcode.NOERROR:
+                                if len(response.answer) > 0:
+                                    return "SAFE"
+                                else:
+                                    return "BLOCKED"
+                            else:
+                                continue
+                                
+                        except socket.timeout:
+                            logger.debug(f"DNS TCP timeout: {dns_server}")
+                            continue
+                        except Exception as e:
+                            logger.debug(f"DNS TCP error: {e}")
+                            continue
+                            
                 except Exception as e:
-                    logger.debug(f"DNS {dns_server} error: {e}")
-                    continue
+                    logger.debug(f"DNS TCP fallback error: {e}")
+                    # Jika TCP gagal, coba UDP biasa
             
-            # Jika semua server gagal
-            return "UNKNOWN"
-            
-        except Exception as e:
-            logger.error(f"Error checking {domain}: {e}")
-            return "UNKNOWN"
-    
-    def check_single_domain(self, domain):
-        """Cek 1 domain"""
-        try:
-            logger.info(f"🔍 Checking domain: {domain}")
-            
-            result = self.check_domain_via_dns(domain)
-            
-            if result == "BLOCKED":
-                logger.warning(f"🚫 {domain}: DIBLOKIR (Nawala)")
-                return True
-            elif result == "SAFE":
-                logger.info(f"✅ {domain}: AMAN")
-                return False
-            else:
-                logger.warning(f"⚠️ {domain}: UNKNOWN - coba metode alternatif")
-                # Coba metode alternatif (via HTTP)
-                return self._check_via_http(domain)
+            # Coba DNS normal (UDP)
+            try:
+                answers = self.resolver.resolve(domain, 'A')
+                logger.debug(f"DNS resolved: {domain}")
+                return "SAFE"
+            except dns.resolver.NXDOMAIN:
+                logger.debug(f"DNS NXDOMAIN: {domain}")
+                return "BLOCKED"
+            except dns.resolver.NoAnswer:
+                try:
+                    answers = self.resolver.resolve(domain, 'CNAME')
+                    return "SAFE"
+                except:
+                    return "BLOCKED"
+            except dns.exception.Timeout:
+                logger.debug(f"DNS Timeout: {domain}")
+                return "TIMEOUT"
+            except dns.resolver.NoNameservers:
+                logger.debug(f"No nameservers: {domain}")
+                return "ERROR"
                 
         except Exception as e:
-            logger.error(f"Error checking {domain}: {e}")
-            return None
+            logger.debug(f"DNS error: {e}")
+            return "ERROR"
     
-    def _check_via_http(self, domain):
-        """Metode alternatif via HTTP (fallback)"""
+    def check_via_http(self, domain):
+        """Cek domain via HTTP dengan dukungan proxy"""
         try:
-            # Coba cek via trustpositif.infonawala.com
-            response = requests.post(
-                "https://trustpositif.infonawala.com",
+            logger.debug(f"HTTP fallback untuk {domain}...")
+            
+            # Gunakan proxy jika di-set
+            session = requests.Session()
+            if self.proxies:
+                session.proxies.update(self.proxies)
+            
+            # Coba ke nawala.online
+            response = session.post(
+                "https://nawala.online",
                 data={'domains': domain},
                 headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                timeout=10,
+                timeout=15,
                 verify=False
             )
             
@@ -218,17 +186,114 @@ class NawalaDNSChecker:
                 domain_lower = domain.lower()
                 
                 if domain_lower in html_lower:
-                    blocked_patterns = ['terblokir', 'diblokir', 'blocked', 'nawala', 'bg-red', 'text-red']
-                    for pattern in blocked_patterns:
-                        if pattern in html_lower:
-                            return True
-                    return False
-                return False
-                
-        except Exception as e:
-            logger.debug(f"HTTP fallback error: {e}")
+                    blocked_indicators = ['blocked', 'terblokir', 'diblokir', 'nawala']
+                    for indicator in blocked_indicators:
+                        if indicator in html_lower:
+                            logger.info(f"HTTP mendeteksi BLOKIR: {domain}")
+                            return "BLOCKED"
+                    logger.info(f"HTTP mendeteksi AMAN: {domain}")
+                    return "SAFE"
+                else:
+                    logger.info(f"HTTP: Domain tidak ditemukan: {domain}")
+                    return "SAFE"
             
-        return False
+            return "ERROR"
+            
+        except requests.exceptions.ProxyError as e:
+            logger.error(f"Proxy error: {e}")
+            return "ERROR"
+        except Exception as e:
+            logger.debug(f"HTTP error: {e}")
+            return "ERROR"
+    
+    def check_via_trustpositif(self, domain):
+        """Cek via trustpositif.id dengan proxy"""
+        try:
+            logger.debug(f"TrustPositif check untuk {domain}...")
+            
+            session = requests.Session()
+            if self.proxies:
+                session.proxies.update(self.proxies)
+            
+            # Kirim POST ke checker
+            response = session.post(
+                "https://trustpositif.id/checker/check",
+                json={'domains': [domain]},
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': 'ukvxzVGQTWSBl5G4JnZgTFVeEuj08r49LYISmaP8',
+                    'Origin': 'https://trustpositif.id',
+                    'Referer': 'https://trustpositif.id/checker',
+                },
+                timeout=15,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    results = data.get('results', [])
+                    for result in results:
+                        if result.get('Blocked') or result.get('blocked'):
+                            logger.warning(f"TrustPositif mendeteksi BLOKIR: {domain}")
+                            return "BLOCKED"
+                    logger.info(f"TrustPositif mendeteksi AMAN: {domain}")
+                    return "SAFE"
+            
+            return "ERROR"
+            
+        except Exception as e:
+            logger.debug(f"TrustPositif error: {e}")
+            return "ERROR"
+    
+    def check_single_domain(self, domain):
+        """Cek 1 domain dengan multiple metode"""
+        try:
+            logger.info(f"🔍 Checking domain: {domain}")
+            
+            # Metode 1: DNS langsung
+            dns_result = self.check_via_dns(domain)
+            
+            if dns_result == "SAFE":
+                logger.info(f"✅ {domain}: AMAN (DNS)")
+                return False
+            elif dns_result == "BLOCKED":
+                logger.warning(f"🚫 {domain}: DIBLOKIR (DNS)")
+                return True
+            elif dns_result == "TIMEOUT":
+                logger.warning(f"⚠️ DNS timeout untuk {domain}, coba HTTP...")
+            else:
+                logger.warning(f"⚠️ DNS error untuk {domain}, coba HTTP...")
+            
+            # Metode 2: HTTP fallback (nawala.online)
+            http_result = self.check_via_http(domain)
+            
+            if http_result == "BLOCKED":
+                logger.warning(f"🚫 {domain}: DIBLOKIR (HTTP)")
+                return True
+            elif http_result == "SAFE":
+                logger.info(f"✅ {domain}: AMAN (HTTP)")
+                return False
+            
+            # Metode 3: TrustPositif
+            tp_result = self.check_via_trustpositif(domain)
+            
+            if tp_result == "BLOCKED":
+                logger.warning(f"🚫 {domain}: DIBLOKIR (TrustPositif)")
+                return True
+            elif tp_result == "SAFE":
+                logger.info(f"✅ {domain}: AMAN (TrustPositif)")
+                return False
+            
+            # Jika semua gagal, asumsi AMAN
+            logger.warning(f"⚠️ {domain}: Semua metode gagal, asumsi AMAN")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking {domain}: {e}")
+            return None
     
     def check_all_domains(self, domains):
         """Cek semua domain satu per satu"""
@@ -245,7 +310,6 @@ class NawalaDNSChecker:
             for i, domain in enumerate(domains, 1):
                 logger.info(f"[{i}/{total}] Memeriksa: {domain}")
                 
-                # Cek domain
                 is_blocked = self.check_single_domain(domain)
                 
                 if is_blocked is True:
@@ -256,9 +320,8 @@ class NawalaDNSChecker:
                 else:
                     logger.warning(f"⚠️ {domain}: TIDAK DIKETAHUI")
                 
-                # Delay antar domain
                 if i < total:
-                    delay = 2
+                    delay = 3
                     logger.info(f"⏳ Menunggu {delay} detik...")
                     time.sleep(delay)
             
@@ -313,12 +376,15 @@ async def kirim_status():
         domains = baca_domain()
         domain_count = len(domains)
         
+        proxy_status = "✅" if USE_PROXY else "❌"
+        
         message = (
-            "🤖 *Nawala DNS Checker Bot*\n\n"
+            "🤖 *Nawala Checker Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Mode:** DNS Query langsung ke Server Nawala\n"
+            f"🔢 **Mode:** DNS + HTTP + TrustPositif\n"
+            f"🔑 **Proxy:** {proxy_status} {'Aktif' if USE_PROXY else 'Nonaktif'}\n"
             f"🌐 **DNS Server:** 180.131.144.144, 180.131.145.145\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
@@ -365,7 +431,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: DNS Server Nawala (180.131.144.144, 180.131.145.145)_"
+                "_Sumber: DNS + HTTP + TrustPositif_"
             )
             
             if len(message) > 4096:
@@ -402,7 +468,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: DNS Server Nawala_"
+                    "_Sumber: DNS + HTTP + TrustPositif_"
                 )
             
             await application.bot.send_message(
@@ -423,8 +489,8 @@ async def cek_domain_job():
     """Job untuk mengecek domain"""
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN NAWALA VIA DNS")
-        logger.info("🔄 DNS Server: 180.131.144.144, 180.131.145.145")
+        logger.info("🔄 MEMULAI PEMERIKSAAN NAWALA")
+        logger.info(f"🔄 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -434,7 +500,7 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = NawalaDNSChecker()
+        checker = NawalaChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -473,14 +539,13 @@ async def schedule_runner():
 async def main():
     """Main function"""
     print("\n" + "=" * 60)
-    print("🚀 NAWALA DNS CHECKER BOT")
-    print("📌 Mode: DNS Query langsung ke Server Nawala")
-    print("📌 DNS Server: 180.131.144.144, 180.131.145.145")
+    print("🚀 NAWALA CHECKER BOT")
+    print("📌 Mode: DNS + HTTP + TrustPositif")
+    print(f"📌 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🌐 DNS Server: 180.131.144.144, 180.131.145.145")
-    logger.info("📌 Mode: DNS Query langsung (paling akurat)")
+    logger.info(f"🌐 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
     
     await kirim_status()
     
@@ -497,8 +562,8 @@ async def main():
     
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
-    logger.info("📍 Mode: DNS Query langsung ke Server Nawala")
-    logger.info("📍 DNS Server: 180.131.144.144, 180.131.145.145")
+    logger.info("📍 Mode: DNS + HTTP + TrustPositif")
+    logger.info(f"📍 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
@@ -508,10 +573,11 @@ if __name__ == "__main__":
         import schedule
         import requests
         from telegram import __version__
-        logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
+        import dns
+        logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}, dnspython")
     except ImportError as e:
         logger.error(f"Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot")
+        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot dnspython")
         sys.exit(1)
     
     try:
