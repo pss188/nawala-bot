@@ -25,7 +25,7 @@ if not TOKEN or not CHAT_ID:
     sys.exit(1)
 
 # Proxy configuration
-PROXY_HOST = "95.135.92.164"
+PROXY_HOST = "193.5.64.24"
 PROXY_PORT_HTTP = 59100
 PROXY_USERNAME = "pulsaslot1888"
 PROXY_PASSWORD = "b3Kft6IMwG"
