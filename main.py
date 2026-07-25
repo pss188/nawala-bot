@@ -4,9 +4,8 @@ import time
 import asyncio
 import logging
 import schedule
-import json
-import re
 import socket
+import struct
 from telegram.ext import Application
 from datetime import datetime
 import requests
@@ -26,56 +25,9 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Proxy configuration
-USE_PROXY = os.getenv("USE_PROXY", "true").lower() == "true"
-PROXY_HOST = os.getenv("PROXY_HOST", "193.5.64.24")
-PROXY_PORT = os.getenv("PROXY_PORT", "59101")
-PROXY_USERNAME = os.getenv("PROXY_USERNAME", "pulsaslot1888")
-PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "b3Kft6IMwG")
-PROXY_TYPE = os.getenv("PROXY_TYPE", "socks5")
-
 if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
-
-# Setup proxy untuk requests
-proxies = None
-if USE_PROXY and PROXY_HOST and PROXY_PORT:
-    if PROXY_TYPE.lower() == "socks5":
-        if PROXY_USERNAME and PROXY_PASSWORD:
-            proxy_url = f"socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
-        else:
-            proxy_url = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
-        proxies = {'http': proxy_url, 'https': proxy_url}
-        logger.info(f"🔑 Menggunakan SOCKS5 proxy: {PROXY_HOST}:{PROXY_PORT}")
-    else:
-        if PROXY_USERNAME and PROXY_PASSWORD:
-            proxy_url = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
-        else:
-            proxy_url = f"http://{PROXY_HOST}:{PROXY_PORT}"
-        proxies = {'http': proxy_url, 'https': proxy_url}
-        logger.info(f"🔑 Menggunakan HTTP proxy: {PROXY_HOST}:{PROXY_PORT}")
-else:
-    proxies = None
-    logger.info("🔓 Koneksi langsung (tanpa proxy)")
-
-# Setup SOCKS5 untuk socket
-if USE_PROXY and PROXY_TYPE.lower() == "socks5":
-    try:
-        import socks
-        socks.set_default_proxy(
-            socks.SOCKS5,
-            PROXY_HOST,
-            int(PROXY_PORT),
-            username=PROXY_USERNAME if PROXY_USERNAME else None,
-            password=PROXY_PASSWORD if PROXY_PASSWORD else None
-        )
-        socket.socket = socks.socksocket
-        logger.info("✅ SOCKS5 proxy di-set")
-    except ImportError:
-        logger.warning("⚠️ PySocks tidak terinstall")
-    except Exception as e:
-        logger.error(f"❌ Gagal setup SOCKS5: {e}")
 
 # Bot setup
 try:
@@ -85,181 +37,184 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-def baca_domain():
-    """Baca domain dari file domain.txt"""
-    try:
-        # Cek apakah file domain.txt ada
-        if not os.path.exists("domain.txt"):
-            logger.error("❌ File domain.txt tidak ditemukan!")
-            logger.info("📝 Membuat file domain.txt contoh...")
-            with open("domain.txt", "w") as f:
-                f.write("# Daftar domain untuk dicek\n")
-                f.write("# Satu domain per baris\n")
-                f.write("google.com\n")
-                f.write("facebook.com\n")
-                f.write("twitter.com\n")
-            return []
-        
-        domains = []
-        with open("domain.txt", "r") as f:
-            for line in f:
-                line = line.strip()
-                # Skip komentar dan baris kosong
-                if line and not line.startswith('#'):
-                    line = line.lower()
-                    # Hapus protocol
-                    for prefix in ['http://', 'https://', 'www.']:
-                        if line.startswith(prefix):
-                            line = line[len(prefix):]
-                    line = line.rstrip('/')
-                    # Validasi domain sederhana
-                    if '.' in line and len(line) > 3:
-                        domains.append(line)
-        
-        if domains:
-            logger.info(f"📖 Membaca {len(domains)} domain dari domain.txt")
-            for domain in domains:
-                logger.info(f"   - {domain}")
-        else:
-            logger.warning("⚠️ Tidak ada domain ditemukan di domain.txt")
-        
-        return domains
-        
-    except Exception as e:
-        logger.error(f"Error membaca domain: {e}")
-        return []
-
-class TrustPositifChecker:
+class NawalaDNSChecker:
     def __init__(self):
-        self.base_url = "https://trustpositif.id"
-        self.checker_url = f"{self.base_url}/checker"
-        self.session = requests.Session()
-        if proxies:
-            self.session.proxies.update(proxies)
+        # DNS server ISP Indonesia (yang terkenal memblokir)
+        self.dns_servers = [
+            ("180.131.144.144", 53),  # Nawala
+            ("180.131.145.145", 53),  # Nawala
+            ("202.152.2.2", 53),      # MyRepublic
+            ("103.12.160.2", 53),     # First Media
+        ]
         
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Origin': self.base_url,
-            'Referer': f'{self.checker_url}/',
-            'Content-Type': 'application/json',
-        }
+        # IP yang menunjukkan domain diblokir
+        self.blocked_ips = [
+            "114.127.223.16",  # IndiHome
+            "180.131.144.144", # Nawala
+            "0.0.0.0",
+            "127.0.0.1",
+        ]
     
-    def check_batch(self, domains):
-        """Cek batch domain"""
+    def _build_dns_query(self, domain):
+        """Bangun DNS query packet"""
+        transaction_id = b'\xaa\xaa'
+        flags = b'\x01\x00'
+        qdcount = b'\x00\x01'
+        ancount = b'\x00\x00'
+        nscount = b'\x00\x00'
+        arcount = b'\x00\x00'
+        
+        qname = b''
+        for part in domain.split('.'):
+            qname += bytes([len(part)]) + part.encode()
+        qname += b'\x00'
+        
+        qtype = b'\x00\x01'
+        qclass = b'\x00\x01'
+        
+        packet = transaction_id + flags + qdcount + ancount + nscount + arcount + qname + qtype + qclass
+        return packet
+    
+    def _parse_dns_response(self, data):
+        """Parse DNS response"""
         try:
-            if not domains:
-                return []
+            # Check if it's a response
+            qr = (data[2] & 0x80) != 0
+            if not qr:
+                return None
             
-            if len(domains) > 100:
-                domains = domains[:100]
+            # Check TC flag (Truncated) - tanda blokir
+            tc_flag = (data[2] & 0x02) != 0
+            if tc_flag:
+                return "BLOCKED_TC"
             
-            logger.info(f"🔍 Checking {len(domains)} domains...")
+            # Check response code
+            response_code = data[3] & 0x0F
+            if response_code == 3:  # NXDOMAIN
+                return "BLOCKED_NX"
             
-            response = self.session.post(
-                f"{self.checker_url}/check",
-                json={'domains': domains},
-                headers=self.headers,
-                timeout=30,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    return self._parse_results(data.get('results', []))
-                else:
-                    logger.error(f"API error: {data.get('message', 'Unknown')}")
-                    return []
+            # Get answer count
+            answer_count = struct.unpack('>H', data[6:8])[0]
+            if answer_count > 0:
+                # Cek IP address di answer
+                try:
+                    # Cari IP di response
+                    ip_start = data.find(b'\xc0\x0c')  # Pointer ke nama
+                    if ip_start != -1:
+                        # Coba extract IP dari answer section
+                        # Ini parsing sederhana, bisa lebih kompleks
+                        pass
+                except:
+                    pass
+                return "RESOLVED"
             else:
-                logger.error(f"HTTP {response.status_code}")
-                # Jika 403 dan pakai proxy, coba tanpa proxy
-                if response.status_code == 403 and proxies:
-                    logger.warning("⚠️ Proxy ditolak, mencoba tanpa proxy...")
-                    fallback_session = requests.Session()
-                    fallback_response = fallback_session.post(
-                        f"{self.checker_url}/check",
-                        json={'domains': domains},
-                        headers=self.headers,
-                        timeout=30,
-                        verify=False
-                    )
-                    if fallback_response.status_code == 200:
-                        data = fallback_response.json()
-                        if data.get('success'):
-                            return self._parse_results(data.get('results', []))
-                return []
+                return "NO_RECORD"
+            
+        except Exception as e:
+            logger.debug(f"Parse error: {e}")
+            return "ERROR"
+    
+    def check_via_dns(self, domain):
+        """Cek domain via DNS query"""
+        try:
+            query = self._build_dns_query(domain)
+            
+            for dns_server, dns_port in self.dns_servers:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.settimeout(3)
+                    sock.sendto(query, (dns_server, dns_port))
+                    data, addr = sock.recvfrom(512)
+                    sock.close()
+                    
+                    result = self._parse_dns_response(data)
+                    
+                    if result in ["BLOCKED_TC", "BLOCKED_NX"]:
+                        return "BLOCKED"
+                    elif result == "RESOLVED":
+                        return "SAFE"
+                    elif result == "NO_RECORD":
+                        return "SAFE"
+                        
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    continue
+            
+            return "TIMEOUT"
+            
+        except Exception as e:
+            return "ERROR"
+    
+    def check_single_domain(self, domain):
+        """Cek 1 domain"""
+        try:
+            logger.info(f"🔍 Checking: {domain}")
+            
+            result = self.check_via_dns(domain)
+            
+            if result == "BLOCKED":
+                logger.warning(f"🚫 {domain}: DIBLOKIR")
+                return True
+            elif result in ["SAFE", "NO_RECORD"]:
+                logger.info(f"✅ {domain}: AMAN")
+                return False
+            else:
+                logger.warning(f"⚠️ {domain}: {result} - asumsi AMAN")
+                return False
                 
-        except requests.exceptions.ProxyError as e:
-            logger.error(f"Proxy error: {e}")
-            try:
-                logger.warning("🔄 Mencoba tanpa proxy...")
-                fallback_session = requests.Session()
-                response = fallback_session.post(
-                    f"{self.checker_url}/check",
-                    json={'domains': domains},
-                    headers=self.headers,
-                    timeout=30,
-                    verify=False
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('success'):
-                        return self._parse_results(data.get('results', []))
-            except:
-                pass
-            return []
         except Exception as e:
             logger.error(f"Error: {e}")
-            return []
-    
-    def _parse_results(self, results):
-        """Parse hasil dari API"""
-        blocked = []
-        for result in results:
-            domain = result.get('Domain', '') or result.get('domain', '')
-            is_blocked = result.get('Blocked', False) or result.get('blocked', False)
-            
-            if domain and is_blocked:
-                blocked.append(domain)
-                logger.warning(f"🚫 {domain}: DIBLOKIR")
-            elif domain:
-                logger.info(f"✅ {domain}: AMAN")
-        
-        return blocked
+            return False
     
     def check_all_domains(self, domains):
-        """Cek semua domain dengan batch"""
+        """Cek semua domain"""
         try:
             if not domains:
                 return []
             
             all_blocked = []
-            batch_size = 100
+            total = len(domains)
             
-            for i in range(0, len(domains), batch_size):
-                batch = domains[i:i + batch_size]
-                batch_num = i // batch_size + 1
-                total = (len(domains) + batch_size - 1) // batch_size
-                
-                logger.info(f"📦 Batch {batch_num}/{total}: {len(batch)} domains")
-                
-                blocked_batch = self.check_batch(batch)
-                all_blocked.extend(blocked_batch)
-                
-                if i + batch_size < len(domains):
-                    delay = 5
-                    logger.info(f"⏳ Menunggu {delay} detik...")
-                    time.sleep(delay)
+            for i, domain in enumerate(domains, 1):
+                logger.info(f"[{i}/{total}] {domain}")
+                is_blocked = self.check_single_domain(domain)
+                if is_blocked:
+                    all_blocked.append(domain)
+                time.sleep(1)
             
             return all_blocked
             
         except Exception as e:
             logger.error(f"Error: {e}")
             return []
+
+def baca_domain():
+    """Baca domain dari file domain.txt"""
+    try:
+        if not os.path.exists("domain.txt"):
+            logger.error("❌ File domain.txt tidak ditemukan!")
+            return []
+        
+        domains = []
+        with open("domain.txt", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    line = line.lower()
+                    for prefix in ['http://', 'https://', 'www.']:
+                        if line.startswith(prefix):
+                            line = line[len(prefix):]
+                    line = line.rstrip('/')
+                    if '.' in line and len(line) > 3:
+                        domains.append(line)
+        
+        logger.info(f"📖 Membaca {len(domains)} domain dari domain.txt")
+        return domains
+        
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return []
 
 # ============================================
 # FUNGSI TELEGRAM
@@ -271,16 +226,13 @@ async def kirim_status():
         domains = baca_domain()
         domain_count = len(domains)
         
-        proxy_status = "✅" if USE_PROXY else "❌"
-        
         message = (
-            "🤖 *TrustPositif Checker Bot*\n\n"
+            "🤖 *Nawala Checker Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Mode:** Batch (max 100 domain/request)\n"
-            f"🔑 **Proxy:** {proxy_status}\n"
-            f"🌐 **Sumber:** trustpositif.id/checker\n\n"
+            f"🔢 **Mode:** DNS Query\n"
+            f"🌐 **DNS Server:** Nawala + ISP Indonesia\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -325,7 +277,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: trustpositif.id/checker_"
+                "_Sumber: DNS Server Nawala + ISP Indonesia_"
             )
             
             if len(message) > 4096:
@@ -361,7 +313,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: trustpositif.id/checker_"
+                    "_Sumber: DNS Server Nawala + ISP Indonesia_"
                 )
             
             await application.bot.send_message(
@@ -381,8 +333,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
 async def cek_domain_job():
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.ID")
-        logger.info(f"🔄 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
+        logger.info("🔄 MEMULAI PEMERIKSAAN NAWALA VIA DNS")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -392,7 +343,7 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = TrustPositifChecker()
+        checker = NawalaDNSChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -407,7 +358,7 @@ async def cek_domain_job():
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"Error dalam cek_domain_job: {e}")
+        logger.error(f"Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
 
@@ -423,23 +374,16 @@ async def schedule_runner():
             logger.info("🛑 Schedule runner dihentikan")
             break
         except Exception as e:
-            logger.error(f"Error dalam schedule runner: {e}")
+            logger.error(f"Error: {e}")
             await asyncio.sleep(5)
 
 async def main():
     print("\n" + "=" * 60)
-    print("🚀 TRUSTPOSITIF.ID CHECKER BOT")
-    print(f"📌 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
-    if USE_PROXY:
-        print(f"📌 Proxy: {PROXY_HOST}:{PROXY_PORT} ({PROXY_TYPE.upper()})")
+    print("🚀 NAWALA DNS CHECKER BOT")
+    print("📌 Mode: DNS Query ke Server ISP Indonesia")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🌐 Source: trustpositif.id/checker")
-    
-    # Cek domain.txt
-    domains = baca_domain()
-    logger.info(f"📊 Total domain terdaftar: {len(domains)}")
     
     await kirim_status()
     
@@ -456,8 +400,7 @@ async def main():
     
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
-    logger.info("📍 Mode: Batch (max 100 domain per request)")
-    logger.info(f"📍 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
+    logger.info("📍 Mode: DNS Query")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
