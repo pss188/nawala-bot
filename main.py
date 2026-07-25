@@ -49,9 +49,11 @@ class TrustPositifChecker:
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
         }
     
     def check_single_domain(self, domain):
@@ -61,18 +63,18 @@ class TrustPositifChecker:
             
             # Coba berbagai pendekatan untuk 1 domain
             
-            # Pendekatan 1: POST dengan form data
-            result = self._check_single_via_form(domain)
+            # Pendekatan 1: POST ke API Next.js dengan JSON
+            result = self._check_via_nextjs_api(domain)
             if result is not None:
                 return result
             
-            # Pendekatan 2: GET dengan query parameter
-            result = self._check_single_via_get(domain)
+            # Pendekatan 2: POST dengan form data
+            result = self._check_via_form(domain)
             if result is not None:
                 return result
             
-            # Pendekatan 3: POST dengan JSON
-            result = self._check_single_via_json(domain)
+            # Pendekatan 3: GET dengan query parameter
+            result = self._check_via_get(domain)
             if result is not None:
                 return result
             
@@ -83,10 +85,79 @@ class TrustPositifChecker:
             logger.error(f"❌ Error checking domain {domain}: {e}")
             return None
     
-    def _check_single_via_form(self, domain):
-        """Coba dengan form data untuk 1 domain"""
+    def _check_via_nextjs_api(self, domain):
+        """Coba dengan Next.js API routes"""
         try:
-            # Berbagai payload yang mungkin
+            # Next.js API routes yang umum
+            endpoints = [
+                f"{self.base_url}/api/check",
+                f"{self.base_url}/api/domains",
+                f"{self.base_url}/api/nawala",
+                f"{self.base_url}/api/trustpositif",
+                f"{self.base_url}/api/cek",
+                f"{self.base_url}/api/scan",
+            ]
+            
+            # Berbagai payload format
+            payloads = [
+                {'domain': domain},
+                {'domains': [domain]},
+                {'url': domain},
+                {'q': domain},
+                {'query': domain},
+                {'data': {'domain': domain}},
+                {'domains': domain},
+            ]
+            
+            for endpoint in endpoints:
+                for payload in payloads:
+                    try:
+                        # Coba dengan JSON
+                        response = self.session.post(
+                            endpoint,
+                            json=payload,
+                            headers={
+                                **self.headers,
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json',
+                            },
+                            timeout=20,
+                            verify=False
+                        )
+                        
+                        if response.status_code == 200:
+                            try:
+                                data = response.json()
+                                is_blocked = self._parse_json_response(data, domain)
+                                if is_blocked is not None:
+                                    logger.info(f"✅ API success: {endpoint}")
+                                    return is_blocked
+                            except:
+                                # Jika bukan JSON, coba parse HTML
+                                is_blocked = self._parse_html_response(response.text, domain)
+                                if is_blocked is not None:
+                                    logger.info(f"✅ API returned HTML: {endpoint}")
+                                    return is_blocked
+                                    
+                    except Exception as e:
+                        continue
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Next.js API error: {e}")
+            return None
+    
+    def _check_via_form(self, domain):
+        """Coba dengan form data (Next.js form action)"""
+        try:
+            # Next.js form action biasanya ke root atau /api/check
+            endpoints = [
+                self.base_url,
+                f"{self.base_url}/check",
+                f"{self.base_url}/cek",
+            ]
+            
             payloads = [
                 {'domain': domain},
                 {'domains': domain},
@@ -95,15 +166,6 @@ class TrustPositifChecker:
                 {'check': domain},
                 {'query': domain},
                 {'action': 'check', 'domain': domain},
-                {'domain[]': domain},
-            ]
-            
-            endpoints = [
-                self.base_url,
-                f"{self.base_url}/check",
-                f"{self.base_url}/cek",
-                f"{self.base_url}/scan",
-                f"{self.base_url}/api/check",
             ]
             
             for endpoint in endpoints:
@@ -121,9 +183,9 @@ class TrustPositifChecker:
                         )
                         
                         if response.status_code == 200:
-                            is_blocked = self._parse_single_response(response.text, domain)
+                            is_blocked = self._parse_html_response(response.text, domain)
                             if is_blocked is not None:
-                                logger.info(f"✅ Form success for {domain} via {endpoint}")
+                                logger.info(f"✅ Form success: {endpoint}")
                                 return is_blocked
                                 
                     except Exception as e:
@@ -132,11 +194,11 @@ class TrustPositifChecker:
             return None
             
         except Exception as e:
-            logger.error(f"❌ Form check error: {e}")
+            logger.error(f"❌ Form error: {e}")
             return None
     
-    def _check_single_via_get(self, domain):
-        """Coba dengan GET request untuk 1 domain"""
+    def _check_via_get(self, domain):
+        """Coba dengan GET request"""
         try:
             params_list = [
                 {'domain': domain},
@@ -157,9 +219,9 @@ class TrustPositifChecker:
                     )
                     
                     if response.status_code == 200:
-                        is_blocked = self._parse_single_response(response.text, domain)
+                        is_blocked = self._parse_html_response(response.text, domain)
                         if is_blocked is not None:
-                            logger.info(f"✅ GET success for {domain} with params: {params}")
+                            logger.info(f"✅ GET success: {params}")
                             return is_blocked
                             
                 except Exception as e:
@@ -168,66 +230,75 @@ class TrustPositifChecker:
             return None
             
         except Exception as e:
-            logger.error(f"❌ GET check error: {e}")
+            logger.error(f"❌ GET error: {e}")
             return None
     
-    def _check_single_via_json(self, domain):
-        """Coba dengan JSON payload untuk 1 domain"""
+    def _parse_json_response(self, data, domain):
+        """Parse JSON response dari Next.js API - return True if blocked, False if safe, None if unknown"""
         try:
-            payloads = [
-                {'domain': domain},
-                {'domains': [domain]},
-                {'url': domain},
-                {'q': domain},
-            ]
+            domain_lower = domain.lower()
             
-            endpoints = [
-                f"{self.base_url}/api",
-                f"{self.base_url}/api/check",
-                f"{self.base_url}/check",
-                f"{self.base_url}/scan",
-            ]
+            if isinstance(data, dict):
+                # Cari di berbagai field yang umum di Next.js API
+                for key in ['data', 'result', 'results', 'domains', 'status', 'blocked', 'response']:
+                    if key in data:
+                        if isinstance(data[key], list):
+                            for item in data[key]:
+                                if isinstance(item, dict):
+                                    item_domain = self._extract_domain(item)
+                                    if item_domain == domain_lower:
+                                        status = str(item.get('status', '')).lower()
+                                        blocked = item.get('blocked', False) or item.get('is_blocked', False)
+                                        
+                                        if blocked or status in ['blocked', 'terblokir', 'true', '1']:
+                                            return True
+                                        elif status in ['clean', 'ok', 'allowed', 'aman', 'false', '0']:
+                                            return False
+                                        
+                        elif isinstance(data[key], dict):
+                            for d, value in data[key].items():
+                                if d.lower() == domain_lower:
+                                    if isinstance(value, dict):
+                                        status = str(value.get('status', '')).lower()
+                                        blocked = value.get('blocked', False)
+                                        if blocked or status in ['blocked', 'terblokir']:
+                                            return True
+                                    elif str(value).lower() in ['blocked', 'terblokir', 'true', '1']:
+                                        return True
+                                    elif str(value).lower() in ['clean', 'ok', 'allowed', 'false', '0']:
+                                        return False
+                
+                # Cek field langsung
+                if 'status' in data and 'domain' in data:
+                    if data['domain'].lower() == domain_lower:
+                        status = str(data['status']).lower()
+                        if status in ['blocked', 'terblokir']:
+                            return True
+                        elif status in ['clean', 'ok', 'allowed', 'aman']:
+                            return False
             
-            for endpoint in endpoints:
-                for payload in payloads:
-                    try:
-                        response = self.session.post(
-                            endpoint,
-                            json=payload,
-                            headers={
-                                **self.headers,
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                            },
-                            timeout=20,
-                            verify=False
-                        )
-                        
-                        if response.status_code == 200:
-                            try:
-                                data = response.json()
-                                is_blocked = self._parse_json_single(data, domain)
-                                if is_blocked is not None:
-                                    logger.info(f"✅ JSON success for {domain} via {endpoint}")
-                                    return is_blocked
-                            except:
-                                # Jika bukan JSON, coba parse HTML
-                                is_blocked = self._parse_single_response(response.text, domain)
-                                if is_blocked is not None:
-                                    logger.info(f"✅ JSON endpoint returned HTML for {domain}")
-                                    return is_blocked
-                                    
-                    except Exception as e:
-                        continue
+            # Cek di seluruh JSON string
+            json_str = json.dumps(data).lower()
+            if domain_lower in json_str:
+                if 'blocked' in json_str or 'terblokir' in json_str:
+                    # Cek apakah ada indikasi aman juga
+                    if 'allowed' in json_str or 'aman' in json_str:
+                        # Jika ada keduanya, cek konteks
+                        domain_index = json_str.find(domain_lower)
+                        context = json_str[domain_index:domain_index+200]
+                        if 'blocked' in context or 'terblokir' in context:
+                            return True
+                        return False
+                    return True
             
-            return None
+            return False
             
         except Exception as e:
-            logger.error(f"❌ JSON check error: {e}")
+            logger.error(f"❌ JSON parse error: {e}")
             return None
     
-    def _parse_single_response(self, html, domain):
-        """Parse HTML response untuk 1 domain - return True if blocked, False if safe, None if unknown"""
+    def _parse_html_response(self, html, domain):
+        """Parse HTML response - return True if blocked, False if safe, None if unknown"""
         try:
             html_lower = html.lower()
             domain_lower = domain.lower()
@@ -241,6 +312,7 @@ class TrustPositifChecker:
                 rf'<div[^>]*>{domain_escaped}</div>',
                 rf'"{domain_escaped}"',
                 rf"'{domain_escaped}'",
+                rf'>\\s*{domain_escaped}\\s*<',
             ]
             
             found = False
@@ -254,13 +326,13 @@ class TrustPositifChecker:
                 return False
             
             # Ambil konteks di sekitar domain
-            match = re.search(rf'.{{0,300}}{domain_escaped}.{{0,300}}', html_lower, re.IGNORECASE)
+            match = re.search(rf'.{{0,400}}{domain_escaped}.{{0,400}}', html_lower, re.IGNORECASE)
             if not match:
                 return False
             
             context = match.group(0)
             
-            # Indikasi terblokir
+            # Indikasi terblokir (Next.js biasanya menggunakan class atau data attributes)
             blocked_indicators = [
                 r'terblokir',
                 r'diblokir',
@@ -272,13 +344,14 @@ class TrustPositifChecker:
                 r'ilegal',
                 r'pornografi',
                 r'perjudian',
+                r'data-status=["\'](blocked|terblokir)["\']',
+                r'class=["\'][^"\']*(blocked|block|red|danger)[^"\']*["\']',
+                r'bg-red',
+                r'text-red',
+                r'border-red',
                 r'status["\']?\s*[:=]\s*["\']?(blocked|terblokir)',
                 r'<span[^>]*class=["\'].*?blocked.*?["\'][^>]*>',
                 r'<td[^>]*>.*?(blocked|terblokir).*?</td>',
-                r'bg-red',
-                r'text-red',
-                r'class=["\'].*?danger.*?["\']',
-                r'class=["\'].*?error.*?["\']',
             ]
             
             # Indikasi aman
@@ -288,84 +361,54 @@ class TrustPositifChecker:
                 r'allowed',
                 r'tidak ada',
                 r'tidak ditemukan',
-                r'status["\']?\s*[:=]\s*["\']?(clean|ok|allowed)',
-                r'<span[^>]*class=["\'].*?success.*?["\'][^>]*>',
+                r'data-status=["\'](clean|ok|allowed|aman)["\']',
+                r'class=["\'][^"\']*(success|green|safe)[^"\']*["\']',
                 r'bg-green',
                 r'text-green',
-                r'class=["\'].*?safe.*?["\']',
+                r'border-green',
+                r'status["\']?\s*[:=]\s*["\']?(clean|ok|allowed|aman)',
             ]
             
-            # Cek indikasi blokir
+            # Cek indikasi blokir di konteks
             for pattern in blocked_indicators:
                 if re.search(pattern, context, re.IGNORECASE):
                     logger.warning(f"🚫 {domain}: Terdeteksi terblokir")
                     return True
             
-            # Cek indikasi aman
+            # Cek indikasi aman di konteks
             for pattern in safe_indicators:
                 if re.search(pattern, context, re.IGNORECASE):
                     logger.info(f"✅ {domain}: Terdeteksi aman")
                     return False
             
-            # Jika ada indikasi blokir di seluruh HTML
-            for pattern in blocked_indicators:
-                if re.search(pattern, html_lower, re.IGNORECASE):
-                    # Cek apakah pattern ini dekat dengan domain
-                    if domain_lower in html_lower:
-                        logger.warning(f"🚫 {domain}: Terdeteksi terblokir (dari indikator global)")
+            # Cek indikasi blokir di seluruh HTML (jika ada di dekat domain)
+            domain_index = html_lower.find(domain_lower)
+            if domain_index != -1:
+                start = max(0, domain_index - 500)
+                end = min(len(html_lower), domain_index + 500)
+                context_large = html_lower[start:end]
+                
+                for pattern in blocked_indicators:
+                    if re.search(pattern, context_large, re.IGNORECASE):
+                        logger.warning(f"🚫 {domain}: Terdeteksi terblokir (dari konteks luas)")
                         return True
+                
+                for pattern in safe_indicators:
+                    if re.search(pattern, context_large, re.IGNORECASE):
+                        logger.info(f"✅ {domain}: Terdeteksi aman (dari konteks luas)")
+                        return False
             
             # Default: aman
             logger.info(f"✅ {domain}: Tidak terdeteksi blokir (asumsi aman)")
             return False
             
         except Exception as e:
-            logger.error(f"❌ Parse error untuk {domain}: {e}")
-            return None
-    
-    def _parse_json_single(self, data, domain):
-        """Parse JSON response untuk 1 domain - return True if blocked, False if safe, None if unknown"""
-        try:
-            if isinstance(data, dict):
-                # Cari domain di berbagai field
-                for key in ['data', 'result', 'results', 'domains', 'status', 'blocked']:
-                    if key in data:
-                        if isinstance(data[key], list):
-                            for item in data[key]:
-                                if isinstance(item, dict):
-                                    domain_found = self._extract_domain(item)
-                                    if domain_found == domain.lower():
-                                        status = str(item.get('status', '')).lower()
-                                        blocked = item.get('blocked', False)
-                                        
-                                        if blocked or status in ['blocked', 'terblokir']:
-                                            return True
-                                        elif status in ['clean', 'ok', 'allowed', 'aman']:
-                                            return False
-                                        
-                        elif isinstance(data[key], dict):
-                            for d, status in data[key].items():
-                                if d.lower() == domain.lower():
-                                    if str(status).lower() in ['blocked', 'terblokir', 'true', '1']:
-                                        return True
-                                    elif str(status).lower() in ['clean', 'ok', 'allowed', 'false', '0']:
-                                        return False
-            
-            # Cek di seluruh JSON string
-            json_str = json.dumps(data).lower()
-            if domain.lower() in json_str:
-                if 'blocked' in json_str or 'terblokir' in json_str:
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ JSON parse error untuk {domain}: {e}")
+            logger.error(f"❌ HTML parse error: {e}")
             return None
     
     def _extract_domain(self, item):
         """Extract domain dari berbagai format"""
-        for key in ['domain', 'name', 'url', 'host', 'target', 'item']:
+        for key in ['domain', 'name', 'url', 'host', 'target', 'item', 'id']:
             if key in item:
                 return str(item[key]).strip().lower()
         return ''
@@ -387,9 +430,9 @@ class TrustPositifChecker:
                 
                 if is_blocked is True:
                     all_blocked.append(domain)
+                    logger.warning(f"🚫 {domain}: TERBLOKIR")
                 elif is_blocked is False:
-                    # Domain aman, tidak perlu ditambahkan
-                    pass
+                    logger.info(f"✅ {domain}: AMAN")
                 else:
                     # Unknown - coba sekali lagi dengan delay
                     logger.info(f"🔄 Retry {domain}...")
@@ -397,10 +440,13 @@ class TrustPositifChecker:
                     is_blocked = self.check_single_domain(domain)
                     if is_blocked is True:
                         all_blocked.append(domain)
+                        logger.warning(f"🚫 {domain}: TERBLOKIR (setelah retry)")
+                    else:
+                        logger.info(f"✅ {domain}: AMAN (setelah retry)")
                 
                 # Delay antar domain untuk menghindari rate limiting
                 if i < total:
-                    delay = 2  # 2 detik antar domain
+                    delay = 2
                     logger.info(f"⏳ Menunggu {delay} detik sebelum domain berikutnya...")
                     time.sleep(delay)
             
@@ -461,7 +507,7 @@ async def kirim_status():
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Mode:** 1 domain/request\n"
-            f"🌐 **Sumber:** trustpositif.infonawala.com\n\n"
+            f"🌐 **Sumber:** trustpositif.infonawala.com (Next.js)\n\n"
             "_Bot akan mengecek domain satu per satu setiap 15 menit_"
         )
         
@@ -507,7 +553,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: trustpositif.infonawala.com_"
+                "_Sumber: trustpositif.infonawala.com (Next.js)_"
             )
             
             if len(message) > 4096:
@@ -567,6 +613,7 @@ async def cek_domain_job():
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.INFONAWALA.COM")
         logger.info("🔄 Mode: 1 domain per request")
+        logger.info("🔄 Platform: Next.js")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -617,10 +664,11 @@ async def main():
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF.INFONAWALA.COM DOMAIN MONITORING BOT")
     print("📌 Mode: 1 domain per request")
+    print("📌 Platform: Next.js")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🌐 Source: trustpositif.infonawala.com")
+    logger.info("🌐 Source: trustpositif.infonawala.com (Next.js)")
     logger.info("📌 Mode: 1 domain per request (lebih akurat)")
     
     await kirim_status()
@@ -640,6 +688,7 @@ async def main():
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Mode: 1 domain per request")
     logger.info("📍 Delay antar domain: 2 detik")
+    logger.info("📍 Platform: Next.js")
     logger.info("📍 Source: trustpositif.infonawala.com")
     logger.info("📍 Press Ctrl+C to stop\n")
     
