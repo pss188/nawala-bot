@@ -14,10 +14,10 @@ import urllib3
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Setup logging dengan lebih detail
+# Setup logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Set ke DEBUG untuk melihat lebih detail
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -50,141 +50,34 @@ class TrustPositifChecker:
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Cache-Control': 'max-age=0',
-            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Upgrade-Insecure-Requests': '1',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1',
         }
-        
-        # Ambil CSRF token dan form data dari halaman
-        self.csrf_token = None
-        self.form_data = {}
-        self._fetch_page_data()
-    
-    def _fetch_page_data(self):
-        """Ambil data dari halaman (CSRF token, dll)"""
-        try:
-            logger.info("🔄 Mengambil data dari halaman...")
-            response = self.session.get(
-                self.base_url,
-                headers=self.headers,
-                timeout=20,
-                verify=False
-            )
-            
-            if response.status_code == 200:
-                html = response.text
-                
-                # Cari CSRF token di HTML
-                csrf_patterns = [
-                    r'csrfToken["\']?\s*[:=]\s*["\']([^"\']+)',
-                    r'<input[^>]*name=["\']csrfToken["\'][^>]*value=["\']([^"\']+)',
-                    r'<meta[^>]*name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)',
-                    r'_csrf["\']?\s*[:=]\s*["\']([^"\']+)',
-                    r'csrf_token["\']?\s*[:=]\s*["\']([^"\']+)',
-                ]
-                
-                for pattern in csrf_patterns:
-                    match = re.search(pattern, html, re.IGNORECASE)
-                    if match:
-                        self.csrf_token = match.group(1)
-                        logger.info(f"✅ CSRF token ditemukan: {self.csrf_token[:20]}...")
-                        break
-                
-                # Cari form action
-                form_action = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                if form_action:
-                    self.form_action = form_action.group(1)
-                    logger.info(f"✅ Form action: {self.form_action}")
-                else:
-                    self.form_action = self.base_url
-                
-                # Cari input hidden lainnya
-                hidden_inputs = re.findall(r'<input[^>]*type=["\']hidden["\'][^>]*name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']+)["\']', html, re.IGNORECASE)
-                for name, value in hidden_inputs:
-                    self.form_data[name] = value
-                    logger.debug(f"Hidden input: {name} = {value[:20]}...")
-                
-                logger.info(f"✅ Data halaman berhasil diambil")
-                return True
-            else:
-                logger.warning(f"⚠️ Gagal mengambil halaman: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Error fetching page: {e}")
-            return False
     
     def check_single_domain(self, domain):
-        """Cek 1 domain secara individual dengan debug"""
+        """Cek 1 domain secara individual dengan submit form"""
         try:
             logger.info(f"🔍 Checking domain: {domain}")
             
-            # Refresh data halaman setiap kali (untuk token terbaru)
-            self._fetch_page_data()
-            
-            # Coba berbagai pendekatan
-            approaches = [
-                self._check_via_form_submit,
-                self._check_via_api_json,
-                self._check_via_api_form,
-                self._check_via_get,
-            ]
-            
-            for approach in approaches:
-                try:
-                    result = approach(domain)
-                    if result is not None:
-                        return result
-                except Exception as e:
-                    logger.debug(f"Pendekatan {approach.__name__} gagal: {e}")
-                    continue
-            
-            logger.warning(f"⚠️ Semua pendekatan gagal untuk {domain}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking domain {domain}: {e}")
-            return None
-    
-    def _check_via_form_submit(self, domain):
-        """Coba submit form seperti di browser"""
-        try:
-            # Data form yang mungkin
+            # Kirim POST request dengan form data
             form_data = {
                 'domain': domain,
                 'domains': domain,
-                'url': domain,
-                'q': domain,
-                'check': domain,
             }
             
-            # Tambahkan CSRF token jika ada
-            if self.csrf_token:
-                form_data['csrfToken'] = self.csrf_token
-                form_data['_csrf'] = self.csrf_token
-                form_data['csrf_token'] = self.csrf_token
-            
-            # Tambahkan hidden inputs dari halaman
-            form_data.update(self.form_data)
-            
-            logger.debug(f"Form data: {form_data}")
-            
-            # Submit ke form action
             response = self.session.post(
-                self.form_action,
+                self.base_url,
                 data=form_data,
                 headers={
                     **self.headers,
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                timeout=20,
+                timeout=30,
                 verify=False,
                 allow_redirects=True
             )
@@ -192,330 +85,80 @@ class TrustPositifChecker:
             logger.debug(f"Response status: {response.status_code}")
             logger.debug(f"Response URL: {response.url}")
             
-            if response.status_code in [200, 302, 303]:
-                # Coba parse response
-                return self._parse_response(response, domain)
-            
-            return None
+            if response.status_code == 200:
+                return self._parse_result(response.text, domain)
+            else:
+                logger.warning(f"⚠️ Response status: {response.status_code}")
+                return None
             
         except Exception as e:
-            logger.error(f"❌ Form submit error: {e}")
+            logger.error(f"❌ Error checking domain {domain}: {e}")
             return None
     
-    def _check_via_api_json(self, domain):
-        """Coba dengan JSON ke API endpoint"""
+    def _parse_result(self, html, domain):
+        """Parse hasil dari HTML response"""
         try:
-            # Endpoint API yang mungkin
-            api_endpoints = [
-                f"{self.base_url}/api/check",
-                f"{self.base_url}/api/domains",
-                f"{self.base_url}/api/nawala",
-                f"{self.base_url}/api/trustpositif",
-                f"{self.base_url}/api/scan",
-                f"{self.base_url}/api/cek",
+            # Cari status di HTML
+            patterns = [
+                # Pattern untuk status Nawala
+                r'Status Nawala:\s*<span[^>]*>(.*?)</span>',
+                r'Status Nawala[^<]*</h3>\s*<p[^>]*>(.*?)</p>',
+                r'<div[^>]*class="[^"]*red[^"]*"[^>]*>.*?NAWALA.*?</div>',
+                r'<span[^>]*class="[^"]*text-red[^"]*"[^>]*>(.*?)</span>',
+                # Pattern untuk status di card
+                r'<h3[^>]*class="[^"]*font-semibold[^"]*"[^>]*>.*?Status Nawala[^:]*:\s*<span[^>]*>(.*?)</span>',
+                r'<p[^>]*class="[^"]*text-xs[^"]*"[^>]*>.*?(terblokir|diblokir|NAWALA|blocked).*?</p>',
+                # Pattern untuk div hasil
+                r'<div[^>]*class="[^"]*border-red[^"]*"[^>]*>.*?(NAWALA|terblokir|diblokir|blocked).*?</div>',
+                r'<div[^>]*class="[^"]*bg-red[^"]*"[^>]*>.*?(NAWALA|terblokir|diblokir|blocked).*?</div>',
             ]
             
-            payloads = [
-                {'domain': domain},
-                {'domains': [domain]},
-                {'url': domain},
-                {'q': domain},
-                {'query': domain},
-                {'data': domain},
-                {'text': domain},
-            ]
-            
-            for endpoint in api_endpoints:
-                for payload in payloads:
-                    try:
-                        # Tambahkan token jika ada
-                        if self.csrf_token:
-                            payload['csrfToken'] = self.csrf_token
-                            payload['_csrf'] = self.csrf_token
-                        
-                        response = self.session.post(
-                            endpoint,
-                            json=payload,
-                            headers={
-                                **self.headers,
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                                'X-Requested-With': 'XMLHttpRequest',
-                            },
-                            timeout=20,
-                            verify=False
-                        )
-                        
-                        logger.debug(f"API JSON response status: {response.status_code}")
-                        
-                        if response.status_code == 200:
-                            try:
-                                data = response.json()
-                                logger.debug(f"API JSON response: {json.dumps(data, indent=2)[:500]}")
-                                return self._parse_json_response(data, domain)
-                            except:
-                                # Jika bukan JSON, coba parse HTML
-                                return self._parse_html_response(response.text, domain)
-                                
-                    except Exception as e:
-                        continue
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ API JSON error: {e}")
-            return None
-    
-    def _check_via_api_form(self, domain):
-        """Coba dengan form data ke API endpoint"""
-        try:
-            api_endpoints = [
-                f"{self.base_url}/api/check",
-                f"{self.base_url}/api/domains",
-            ]
-            
-            form_data = {
-                'domain': domain,
-                'domains': domain,
-                'url': domain,
-            }
-            
-            if self.csrf_token:
-                form_data['csrfToken'] = self.csrf_token
-            
-            for endpoint in api_endpoints:
-                try:
-                    response = self.session.post(
-                        endpoint,
-                        data=form_data,
-                        headers={
-                            **self.headers,
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'X-Requested-With': 'XMLHttpRequest',
-                        },
-                        timeout=20,
-                        verify=False
-                    )
-                    
-                    if response.status_code == 200:
-                        try:
-                            data = response.json()
-                            return self._parse_json_response(data, domain)
-                        except:
-                            return self._parse_html_response(response.text, domain)
-                            
-                except Exception as e:
-                    continue
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ API Form error: {e}")
-            return None
-    
-    def _check_via_get(self, domain):
-        """Coba dengan GET request"""
-        try:
-            params_list = [
-                {'domain': domain},
-                {'q': domain},
-                {'url': domain},
-                {'check': domain},
-                {'cek': domain},
-            ]
-            
-            for params in params_list:
-                try:
-                    response = self.session.get(
-                        self.base_url,
-                        params=params,
-                        headers=self.headers,
-                        timeout=20,
-                        verify=False
-                    )
-                    
-                    if response.status_code == 200:
-                        return self._parse_html_response(response.text, domain)
-                        
-                except Exception as e:
-                    continue
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ GET error: {e}")
-            return None
-    
-    def _parse_response(self, response, domain):
-        """Parse response dari berbagai format"""
-        try:
-            content_type = response.headers.get('Content-Type', '')
-            
-            if 'application/json' in content_type:
-                try:
-                    data = response.json()
-                    return self._parse_json_response(data, domain)
-                except:
-                    pass
-            
-            # Coba parse HTML
-            return self._parse_html_response(response.text, domain)
-            
-        except Exception as e:
-            logger.error(f"❌ Parse response error: {e}")
-            return None
-    
-    def _parse_json_response(self, data, domain):
-        """Parse JSON response dengan lebih detail"""
-        try:
-            logger.debug(f"Parsing JSON untuk {domain}")
-            domain_lower = domain.lower()
-            
-            # Cek apakah domain ada di response
-            json_str = json.dumps(data).lower()
-            if domain_lower not in json_str:
-                logger.info(f"✅ {domain}: Tidak ditemukan di response (asumsi aman)")
-                return False
-            
-            # Cari status domain
-            if isinstance(data, dict):
-                # Cek berbagai struktur response yang mungkin
-                structures = [
-                    ['data', 'domains'],
-                    ['result', 'domains'],
-                    ['results', 'domains'],
-                    ['domains'],
-                    ['data'],
-                    ['result'],
-                    ['results'],
-                    ['status'],
-                    ['blocked'],
-                ]
-                
-                for path in structures:
-                    current = data
-                    for key in path:
-                        if key in current:
-                            current = current[key]
-                        else:
-                            current = None
-                            break
-                    
-                    if current is not None:
-                        if isinstance(current, list):
-                            for item in current:
-                                if isinstance(item, dict):
-                                    item_domain = str(item.get('domain', '')).lower()
-                                    if item_domain == domain_lower or domain_lower in item_domain:
-                                        status = str(item.get('status', '')).lower()
-                                        blocked = item.get('blocked', False)
-                                        is_blocked = item.get('is_blocked', False)
-                                        
-                                        logger.debug(f"Domain ditemukan: {item_domain}, status: {status}, blocked: {blocked}")
-                                        
-                                        if blocked or is_blocked or status in ['blocked', 'terblokir', 'true', '1']:
-                                            return True
-                                        elif status in ['clean', 'ok', 'allowed', 'aman', 'false', '0', 'tidak ada']:
-                                            return False
-                                        
-                        elif isinstance(current, dict):
-                            for d, value in current.items():
-                                if d.lower() == domain_lower or domain_lower in d.lower():
-                                    if isinstance(value, dict):
-                                        status = str(value.get('status', '')).lower()
-                                        blocked = value.get('blocked', False)
-                                        if blocked or status in ['blocked', 'terblokir']:
-                                            return True
-                                    elif str(value).lower() in ['blocked', 'terblokir', 'true', '1']:
-                                        return True
-                                    elif str(value).lower() in ['clean', 'ok', 'allowed', 'false', '0']:
-                                        return False
-            
-            # Cek di JSON string dengan konteks
-            domain_index = json_str.find(domain_lower)
-            if domain_index != -1:
-                start = max(0, domain_index - 200)
-                end = min(len(json_str), domain_index + 200)
-                context = json_str[start:end]
-                
-                logger.debug(f"Context: {context}")
-                
-                if 'blocked' in context or 'terblokir' in context:
-                    if 'allowed' in context or 'aman' in context or 'clean' in context:
-                        # Ada keduanya, cek yang mana lebih dekat dengan domain
-                        blocked_pos = context.find('blocked')
-                        allowed_pos = context.find('allowed')
-                        if blocked_pos != -1 and (allowed_pos == -1 or blocked_pos < allowed_pos):
-                            return True
-                        return False
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"❌ JSON parse error: {e}")
-            return None
-    
-    def _parse_html_response(self, html, domain):
-        """Parse HTML response dengan lebih detail"""
-        try:
             html_lower = html.lower()
             domain_lower = domain.lower()
             
-            # Cari domain dalam HTML
+            # Cek apakah domain ada di response
             if domain_lower not in html_lower:
-                logger.info(f"✅ {domain}: Tidak ditemukan di HTML (asumsi aman)")
+                logger.info(f"✅ {domain}: Domain tidak ditemukan di response (asumsi aman)")
                 return False
             
-            # Cari konteks
+            # Cari status
+            for pattern in patterns:
+                match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+                if match:
+                    status_text = match.group(1).strip().lower() if match.groups() else match.group(0).strip().lower()
+                    logger.debug(f"Status pattern found: {status_text}")
+                    
+                    # Cek indikasi terblokir
+                    if 'nawala' in status_text or 'terblokir' in status_text or 'diblokir' in status_text or 'blocked' in status_text:
+                        logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA)")
+                        return True
+                    elif 'aman' in status_text or 'safe' in status_text or 'allowed' in status_text:
+                        logger.info(f"✅ {domain}: AMAN")
+                        return False
+            
+            # Cek langsung di HTML untuk kata kunci
+            # Cari div dengan status
+            status_div_pattern = r'<div[^>]*class="[^"]*(?:red|danger|error)[^"]*"[^>]*>(.*?)</div>'
+            matches = re.findall(status_div_pattern, html, re.IGNORECASE | re.DOTALL)
+            
+            for match in matches:
+                if domain_lower in match.lower():
+                    if 'nawala' in match.lower() or 'terblokir' in match.lower() or 'diblokir' in match.lower():
+                        logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA)")
+                        return True
+            
+            # Cek apakah ada teks "NAWALA" di dekat domain
             domain_index = html_lower.find(domain_lower)
-            start = max(0, domain_index - 500)
-            end = min(len(html_lower), domain_index + 500)
-            context = html_lower[start:end]
-            
-            logger.debug(f"HTML Context: {context[:200]}...")
-            
-            # Indikasi terblokir
-            blocked_patterns = [
-                r'terblokir',
-                r'diblokir',
-                r'blocked',
-                r'class=["\'][^"\']*(blocked|block|red|danger|error)[^"\']*["\']',
-                r'data-status=["\'](blocked|terblokir)["\']',
-                r'bg-red',
-                r'text-red',
-                r'border-red',
-                r'status.*?(blocked|terblokir)',
-                r'<td[^>]*>.*?(blocked|terblokir).*?</td>',
-                r'<span[^>]*>.*?(blocked|terblokir).*?</span>',
-                r'<div[^>]*>.*?(blocked|terblokir).*?</div>',
-            ]
-            
-            # Indikasi aman
-            safe_patterns = [
-                r'aman',
-                r'safe',
-                r'allowed',
-                r'tidak ada',
-                r'tidak ditemukan',
-                r'class=["\'][^"\']*(success|green|safe|allowed)[^"\']*["\']',
-                r'data-status=["\'](clean|ok|allowed|aman)["\']',
-                r'bg-green',
-                r'text-green',
-                r'border-green',
-                r'status.*?(clean|ok|allowed|aman)',
-            ]
-            
-            # Cek blokir di konteks
-            for pattern in blocked_patterns:
-                if re.search(pattern, context, re.IGNORECASE):
-                    logger.warning(f"🚫 {domain}: Terdeteksi terblokir")
+            if domain_index != -1:
+                start = max(0, domain_index - 500)
+                end = min(len(html_lower), domain_index + 500)
+                context = html_lower[start:end]
+                
+                if 'nawala' in context or 'terblokir' in context or 'diblokir' in context:
+                    logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA terdeteksi di konteks)")
                     return True
-            
-            # Cek aman di konteks
-            for pattern in safe_patterns:
-                if re.search(pattern, context, re.IGNORECASE):
-                    logger.info(f"✅ {domain}: Terdeteksi aman")
+                elif 'aman' in context or 'safe' in context:
+                    logger.info(f"✅ {domain}: AMAN")
                     return False
             
             # Default: aman
@@ -523,11 +166,11 @@ class TrustPositifChecker:
             return False
             
         except Exception as e:
-            logger.error(f"❌ HTML parse error: {e}")
+            logger.error(f"❌ Parse error: {e}")
             return None
     
     def check_all_domains(self, domains):
-        """Cek semua domain satu per satu dengan debug"""
+        """Cek semua domain satu per satu"""
         try:
             if not domains:
                 return []
@@ -549,7 +192,7 @@ class TrustPositifChecker:
                     logger.info(f"✅ {domain}: AMAN")
                 else:
                     logger.warning(f"⚠️ {domain}: TIDAK DIKETAHUI - coba lagi")
-                    time.sleep(3)
+                    time.sleep(2)
                     is_blocked = self.check_single_domain(domain)
                     if is_blocked is True:
                         all_blocked.append(domain)
@@ -561,7 +204,7 @@ class TrustPositifChecker:
                 
                 # Delay antar domain
                 if i < total:
-                    delay = 3
+                    delay = 2
                     logger.info(f"⏳ Menunggu {delay} detik...")
                     time.sleep(delay)
             
@@ -621,7 +264,7 @@ async def kirim_status():
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Mode:** 1 domain/request (debug mode)\n"
+            f"🔢 **Mode:** 1 domain/request\n"
             f"🌐 **Sumber:** trustpositif.infonawala.com\n\n"
             "_Bot akan mengecek domain satu per satu setiap 15 menit_"
         )
@@ -727,7 +370,7 @@ async def cek_domain_job():
     try:
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.INFONAWALA.COM")
-        logger.info("🔄 Mode: 1 domain per request (DEBUG)")
+        logger.info("🔄 Mode: 1 domain per request")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -777,12 +420,12 @@ async def main():
     """Main function"""
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF.INFONAWALA.COM DOMAIN MONITORING BOT")
-    print("📌 Mode: 1 domain per request (DEBUG)")
+    print("📌 Mode: 1 domain per request")
     print("=" * 60)
     
     logger.info("Bot starting...")
     logger.info("🌐 Source: trustpositif.infonawala.com")
-    logger.info("📌 Mode: 1 domain per request (debug mode)")
+    logger.info("📌 Mode: 1 domain per request")
     
     await kirim_status()
     
@@ -800,7 +443,7 @@ async def main():
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Mode: 1 domain per request")
-    logger.info("📍 Delay antar domain: 3 detik")
+    logger.info("📍 Delay antar domain: 2 detik")
     logger.info("📍 Source: trustpositif.infonawala.com")
     logger.info("📍 Press Ctrl+C to stop\n")
     
