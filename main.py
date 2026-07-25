@@ -6,8 +6,14 @@ import asyncio
 import logging
 import schedule
 import json
+import re
 from telegram.ext import Application
 from datetime import datetime
+from bs4 import BeautifulSoup
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Setup logging
 logging.basicConfig(
@@ -24,20 +30,20 @@ if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
 
-# Proxy configuration
-PROXY_HOST = "193.5.64.24"
-PROXY_PORT_HTTP = 59100
+# ============================================
+# PROXY DISABLED - Menggunakan koneksi langsung
+# ============================================
+USE_PROXY = False  # <--- SET FALSE UNTUK TANPA PROXY
+
+# Proxy config (tidak digunakan)
+PROXY_HOST = "95.135.92.164"
+PROXY_PORT_HTTP = "59100"
 PROXY_USERNAME = "pulsaslot1888"
 PROXY_PASSWORD = "b3Kft6IMwG"
 
-# Proxy URLs
-PROXY_HTTP = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT_HTTP}"
-
-# Konfigurasi proxy
-proxies = {
-    'http': PROXY_HTTP,
-    'https': PROXY_HTTP,
-}
+# Set proxy ke None
+proxies = None
+logger.info("🔓 Using DIRECT CONNECTION (no proxy)")
 
 # Bot setup
 try:
@@ -51,9 +57,11 @@ class TrustPositifChecker:
     def __init__(self):
         self.session = requests.Session()
         self.base_url = "https://trustpositif.komdigi.go.id"
-        self.session.proxies.update(proxies)
         
-        # Headers untuk meniru browser
+        # Tidak menggunakan proxy
+        # self.session.proxies.update(proxies)  # Dikomentari
+        
+        # Headers
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -63,31 +71,63 @@ class TrustPositifChecker:
             'Upgrade-Insecure-Requests': '1',
         }
         
-        # CSRF token dari HTML (tetap)
-        self.csrf_token = "3835f8d38d9c0a271d2d782a70113bc2"
-        
-        # API endpoints dari JavaScript
+        self.csrf_token = self._get_csrf_token()
         self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
     
+    def _get_csrf_token(self):
+        """Fetch CSRF token"""
+        try:
+            logger.info("🔄 Fetching CSRF token...")
+            response = self.session.get(
+                self.base_url,
+                headers=self.headers,
+                timeout=20,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                # Cari dengan BeautifulSoup
+                try:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    csrf_input = soup.find('input', {'name': 'csrf_token'})
+                    if csrf_input and csrf_input.get('value'):
+                        token = csrf_input.get('value')
+                        logger.info(f"✅ CSRF token fetched: {token[:10]}...")
+                        return token
+                except:
+                    pass
+                
+                # Fallback dengan regex
+                match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
+                if match:
+                    token = match.group(1)
+                    logger.info(f"✅ CSRF token fetched (regex): {token[:10]}...")
+                    return token
+            
+            logger.warning("⚠️ Gagal fetch CSRF token, menggunakan default")
+            return "3835f8d38d9c0a271d2d782a70113bc2"
+            
+        except Exception as e:
+            logger.error(f"❌ Gagal fetch CSRF token: {e}")
+            return "3835f8d38d9c0a271d2d782a70113bc2"
+    
     def check_batch_5_domains(self, domains):
-        """Cek 5 domain sekaligus sesuai limit website"""
+        """Cek 5 domain sekaligus"""
         try:
             if len(domains) > 5:
-                logger.warning(f"⚠️ Batch terlalu besar ({len(domains)}), hanya 5 pertama yang dicek")
                 domains = domains[:5]
             
-            # Format domains: satu per baris
             domains_text = "\n".join(domains)
-            
             logger.info(f"🔍 Mengecek batch: {', '.join(domains)}")
             
-            # Data payload sesuai form
+            # Refresh token
+            self.csrf_token = self._get_csrf_token()
+            
             data = {
                 'csrf_token': self.csrf_token,
                 'name': domains_text
             }
             
-            # Headers untuk AJAX request
             api_headers = self.headers.copy()
             api_headers.update({
                 'X-Requested-With': 'XMLHttpRequest',
@@ -96,21 +136,38 @@ class TrustPositifChecker:
                 'Origin': self.base_url
             })
             
-            # Kirim request
-            response = self.session.post(
-                self.api_url,
-                data=data,
-                headers=api_headers,
-                timeout=15
-            )
+            # Kirim request dengan retry
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.post(
+                        self.api_url,
+                        data=data,
+                        headers=api_headers,
+                        timeout=30,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        return self.parse_api_response(response.text, domains)
+                    else:
+                        logger.warning(f"⚠️ Attempt {attempt+1}: HTTP {response.status_code}")
+                        if attempt < max_retries - 1:
+                            time.sleep(3)
+                            continue
+                            
+                except requests.exceptions.Timeout:
+                    logger.warning(f"⚠️ Attempt {attempt+1}: Timeout")
+                    if attempt < max_retries - 1:
+                        time.sleep(3)
+                        continue
+                except Exception as e:
+                    logger.error(f"❌ Attempt {attempt+1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(3)
+                        continue
             
-            logger.info(f"📡 Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                return self.parse_api_response(response.text, domains)
-            else:
-                logger.error(f"❌ HTTP Error {response.status_code}")
-                return []
+            return []
                 
         except Exception as e:
             logger.error(f"❌ Error checking batch: {e}")
@@ -121,44 +178,34 @@ class TrustPositifChecker:
         blocked_domains = []
         
         try:
-            # Coba parse JSON
-            try:
-                result = json.loads(response_text)
+            result = json.loads(response_text)
+            
+            if 'values' in result:
+                domain_status_map = {}
                 
-                if 'values' in result:
-                    # Mapping hasil ke domain asli
-                    domain_status_map = {}
+                for item in result['values']:
+                    if isinstance(item, dict):
+                        domain = item.get('Domain', '').strip().lower()
+                        status = item.get('Status', '').strip()
+                        if domain:
+                            domain_status_map[domain] = status
+                
+                for domain in original_domains:
+                    domain_lower = domain.lower()
+                    status = domain_status_map.get(domain_lower, '')
                     
-                    for item in result['values']:
-                        if isinstance(item, dict):
-                            domain = item.get('Domain', '').strip().lower()
-                            status = item.get('Status', '').strip()
-                            
-                            if domain:
-                                domain_status_map[domain] = status
-                    
-                    # Cek status untuk setiap domain asli
-                    for domain in original_domains:
-                        domain_lower = domain.lower()
-                        status = domain_status_map.get(domain_lower, '')
-                        
-                        if status == 'Tidak Ada':
-                            logger.info(f"✅ {domain}: Aman")
-                        else:
-                            # Jika ada status selain 'Tidak Ada' atau tidak ditemukan
-                            if status:
-                                blocked_domains.append(f"{domain} ({status})")
-                                logger.warning(f"🚫 {domain}: {status}")
-                            else:
-                                # Jika tidak ada dalam response, asumsi aman
-                                logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
-                
-                return blocked_domains
-                
-            except json.JSONDecodeError:
-                # Bukan JSON, parse HTML
-                return self.parse_html_response(response_text, original_domains)
-                
+                    if status == 'Tidak Ada':
+                        logger.info(f"✅ {domain}: Aman")
+                    elif status:
+                        blocked_domains.append(f"{domain} ({status})")
+                        logger.warning(f"🚫 {domain}: {status}")
+                    else:
+                        logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
+            
+            return blocked_domains
+            
+        except json.JSONDecodeError:
+            return self.parse_html_response(response_text, original_domains)
         except Exception as e:
             logger.error(f"❌ Parse error: {e}")
             return []
@@ -168,45 +215,23 @@ class TrustPositifChecker:
         blocked_domains = []
         
         try:
-            # Konversi ke lowercase untuk case-insensitive search
-            html_lower = html.lower()
+            soup = BeautifulSoup(html, 'html.parser')
+            table = soup.find('table')
             
-            for domain in domains:
-                domain_lower = domain.lower()
-                
-                # Cari domain dalam response
-                if domain_lower in html_lower:
-                    # Cari konteks sekitar domain
-                    domain_index = html_lower.find(domain_lower)
-                    start = max(0, domain_index - 100)
-                    end = min(len(html_lower), domain_index + 150)
-                    context = html_lower[start:end]
-                    
-                    # Cek apakah ada "tidak ada" dalam konteks
-                    if 'tidak ada' in context:
-                        logger.info(f"✅ HTML: {domain} aman")
-                    else:
-                        # Cari status dalam tabel
-                        # Pattern: <td>domain</td><td>status</td>
-                        if f'<td>{domain_lower}</td>' in html_lower:
-                            # Cari status setelah domain
-                            pattern = f'<td>{domain_lower}</td>.*?<td>(.*?)</td>'
-                            import re
-                            match = re.search(pattern, html_lower, re.DOTALL)
-                            if match:
-                                status = match.group(1).strip()
-                                if status != 'tidak ada':
-                                    blocked_domains.append(f"{domain} ({status})")
-                                    logger.warning(f"🚫 HTML: {domain} -> {status}")
-                                else:
-                                    logger.info(f"✅ HTML: {domain} aman")
-                        else:
-                            # Jika domain ditemukan tapi tidak ada status jelas
-                            blocked_domains.append(f"{domain} (terdeteksi)")
-                            logger.warning(f"⚠️ HTML: {domain} terdeteksi tapi status tidak jelas")
-                else:
-                    # Domain tidak ditemukan dalam response
-                    logger.info(f"✅ {domain}: Tidak ditemukan dalam response (asumsi aman)")
+            if table:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all('td')
+                    if len(cells) >= 2:
+                        domain = cells[0].text.strip().lower()
+                        status = cells[1].text.strip()
+                        
+                        if domain and status and status.lower() != 'tidak ada':
+                            for original_domain in domains:
+                                if original_domain.lower() == domain:
+                                    blocked_domains.append(f"{original_domain} ({status})")
+                                    logger.warning(f"🚫 HTML: {original_domain} -> {status}")
+                                    break
         
         except Exception as e:
             logger.error(f"❌ HTML parse error: {e}")
@@ -214,35 +239,24 @@ class TrustPositifChecker:
         return blocked_domains
     
     def check_all_domains(self, domains):
-        """Cek semua domain dengan batch 5 domain"""
+        """Cek semua domain dengan batch 5"""
         try:
             if not domains:
                 return []
             
             all_blocked = []
-            total_domains = len(domains)
-            
-            # Bagi domain menjadi batch 5 domain
             batch_size = 5
-            batch_count = 0
             
-            for i in range(0, total_domains, batch_size):
+            for i in range(0, len(domains), batch_size):
                 batch = domains[i:i + batch_size]
-                batch_count += 1
-                
-                logger.info(f"📦 Batch {batch_count}: {len(batch)} domain")
-                
-                # Cek batch
                 blocked_batch = self.check_batch_5_domains(batch)
                 all_blocked.extend(blocked_batch)
                 
-                # Delay antar batch untuk hindari rate limiting
-                if i + batch_size < total_domains:
-                    delay = 3  # 3 detik
-                    logger.info(f"⏳ Menunggu {delay} detik sebelum batch berikutnya...")
-                    time.sleep(delay)
+                # Delay antar batch
+                if i + batch_size < len(domains):
+                    logger.info("⏳ Menunggu 3 detik sebelum batch berikutnya...")
+                    time.sleep(3)
             
-            logger.info(f"📊 Total batch diproses: {batch_count}")
             return all_blocked
             
         except Exception as e:
@@ -256,17 +270,11 @@ def baca_domain():
             logger.error("❌ File domain.txt tidak ditemukan!")
             # Buat file contoh
             with open("domain.txt", "w") as f:
-                f.write("# Daftar domain untuk dicek (maksimal disarankan 50 domain)\n")
+                f.write("# Daftar domain untuk dicek\n")
                 f.write("# Satu domain per baris\n")
-                f.write("# Contoh:\n")
                 f.write("google.com\n")
                 f.write("facebook.com\n")
                 f.write("twitter.com\n")
-                f.write("hkbpokerqqid2.pages.dev\n")
-                f.write("hkbwdcom.pages.dev\n")
-                f.write("jendelatoto.id\n")
-                f.write("jendelatotocomamp.pages.dev\n")
-                f.write("rtpjendelatt.pages.dev\n")
             logger.info("✅ File domain.txt dibuat dengan contoh")
             return []
         
@@ -277,12 +285,10 @@ def baca_domain():
                 if line and not line.startswith('#'):
                     # Bersihkan domain
                     line = line.lower()
-                    # Hapus protocol
                     for prefix in ['http://', 'https://', 'www.']:
                         if line.startswith(prefix):
                             line = line[len(prefix):]
                     line = line.rstrip('/')
-                    # Validasi sederhana
                     if '.' in line and len(line) > 3:
                         domains.append(line)
         
@@ -293,12 +299,14 @@ def baca_domain():
         logger.error(f"❌ Error membaca domain: {e}")
         return []
 
+# ============================================
+# FUNGSI UNTUK TELEGRAM (Tidak berubah)
+# ============================================
+
 async def kirim_status():
     """Kirim status bot"""
     try:
         waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        
-        # Baca jumlah domain
         domains = baca_domain()
         domain_count = len(domains)
         
@@ -307,7 +315,8 @@ async def kirim_status():
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Batch:** 5 domain/request\n\n"
+            f"🔢 **Batch:** 5 domain/request\n"
+            f"🔓 **Koneksi:** Langsung (tanpa proxy)\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -327,13 +336,12 @@ async def kirim_laporan(blocked_domains, total_domains):
         blocked_count = len(blocked_domains)
         
         if blocked_count == 0:
-            # Semua domain aman
             message = (
                 "✅ *LAPORAN CEK NAWALA*\n\n"
                 "**SEMUA DOMAIN AMAN!** 🎉\n\n"
                 f"📊 **Total Domain:** {total_domains}\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "Tidak ada domain yang nawala."
+                "Tidak ada domain yang terblokir."
             )
             
             await application.bot.send_message(
@@ -344,8 +352,6 @@ async def kirim_laporan(blocked_domains, total_domains):
             logger.info(f"📤 Laporan aman: {total_domains} domain")
             
         else:
-            # Ada domain terblokir
-            # Format domain dengan nomor
             domain_list = ""
             for i, domain_info in enumerate(blocked_domains, 1):
                 domain_list += f"{i}. 🚫 `{domain_info}`\n"
@@ -358,7 +364,6 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
             )
             
-            # Cek panjang pesan
             if len(message) > 4096:
                 await kirim_pesan_terbagi(blocked_domains, total_domains)
             else:
@@ -376,8 +381,6 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
     """Kirim pesan terbagi jika terlalu panjang"""
     try:
         blocked_count = len(blocked_domains)
-        
-        # Bagi menjadi chunk 20 domain per pesan
         chunk_size = 20
         chunks = [blocked_domains[i:i + chunk_size] for i in range(0, len(blocked_domains), chunk_size)]
         
@@ -391,7 +394,6 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 f"{domain_list}\n"
             )
             
-            # Jika ini bagian terakhir, tambahkan footer
             if i == len(chunks):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
@@ -405,7 +407,6 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 parse_mode="Markdown"
             )
             
-            # Delay antar pesan
             if i < len(chunks):
                 await asyncio.sleep(1)
         
@@ -421,7 +422,6 @@ async def cek_domain_job():
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF KOMINFO")
         logger.info("=" * 60)
         
-        # Baca domain
         domains = baca_domain()
         if not domains:
             logger.warning("⚠️ Tidak ada domain untuk dicek")
@@ -429,10 +429,8 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        # Buat checker
         checker = TrustPositifChecker()
         
-        # Cek semua domain dengan batch 5
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
         elapsed_time = time.time() - start_time
@@ -440,7 +438,6 @@ async def cek_domain_job():
         logger.info(f"⏱️ Waktu pemrosesan: {elapsed_time:.2f} detik")
         logger.info(f"📊 Hasil: {len(blocked_domains)} dari {len(domains)} domain terblokir")
         
-        # Kirim laporan
         await kirim_laporan(blocked_domains, len(domains))
         
         logger.info("✅ Pemeriksaan selesai")
@@ -476,11 +473,10 @@ async def test_koneksi():
         response = requests.get(
             "https://trustpositif.komdigi.go.id/",
             timeout=10,
-            proxies=proxies
+            verify=False
         )
         
         if response.status_code == 200:
-            # Cek apakah halaman utama terbuka
             if 'TrustPositif' in response.text:
                 logger.info("✅ Koneksi BERHASIL - TrustPositif terdeteksi")
                 return True
@@ -502,29 +498,23 @@ async def main():
     print("=" * 60)
     
     logger.info("Bot starting...")
+    logger.info("🔓 Using DIRECT CONNECTION (no proxy)")
     
     # Test koneksi
-    logger.info("Testing connection...")
     if not await test_koneksi():
         logger.warning("⚠️ Koneksi bermasalah, bot tetap berjalan...")
     else:
         logger.info("✅ Koneksi OK")
     
-    # Kirim status awal
     await kirim_status()
     
-    # Setup schedule
     logger.info("Setting up schedule...")
-    
-    # Cek domain setiap 15 menit
     schedule.every(15).minutes.do(lambda: run_async_job(cek_domain_job))
     logger.info("✅ Schedule: Check domains every 15 minutes")
     
-    # Status setiap 3 jam
     schedule.every(3).hours.do(lambda: run_async_job(kirim_status))
     logger.info("✅ Schedule: Status report every 3 hours")
     
-    # Jalankan pengecekan pertama dengan delay
     logger.info("Running first check in 5 seconds...")
     await asyncio.sleep(5)
     await cek_domain_job()
@@ -533,13 +523,12 @@ async def main():
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
     logger.info("📍 Batch size: 5 domains per request")
+    logger.info("📍 Connection: Direct (no proxy)")
     logger.info("📍 Press Ctrl+C to stop\n")
     
-    # Jalankan schedule runner
     await schedule_runner()
 
 if __name__ == "__main__":
-    # Cek dependencies
     try:
         import schedule
         import requests
@@ -550,7 +539,6 @@ if __name__ == "__main__":
         logger.info("💡 Install dengan: pip install -r requirements.txt")
         sys.exit(1)
     
-    # Jalankan bot
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
