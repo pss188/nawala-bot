@@ -70,292 +70,53 @@ class TrustPositifIDChecker:
             
             logger.info(f"🔍 Checking {len(domains)} domains in batch...")
             
-            # Format domains: satu per baris atau dipisahkan koma
+            # Format domains: satu per baris
             domains_text = "\n".join(domains)
-            domains_comma = ", ".join(domains)
             
-            # Coba berbagai pendekatan
-            
-            # Pendekatan 1: POST dengan JSON
-            result = self._check_via_json(domains, domains_text)
-            if result is not None:
-                return result
-            
-            # Pendekatan 2: POST dengan form data
-            result = self._check_via_form(domains, domains_text)
-            if result is not None:
-                return result
-            
-            # Pendekatan 3: GET dengan query parameter
-            result = self._check_via_get(domains)
-            if result is not None:
-                return result
-            
-            logger.error("❌ Semua pendekatan gagal")
-            return []
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking batch: {e}")
-            return []
-    
-    def _check_via_json(self, domains, domains_text):
-        """Coba dengan JSON payload"""
-        try:
-            # Endpoint yang mungkin
-            endpoints = [
-                f"{self.checker_url}/api/check",
-                f"{self.checker_url}/api/domains",
-                f"{self.base_url}/api/check",
-                f"{self.base_url}/api/nawala",
-                f"{self.checker_url}/check",
-            ]
-            
-            # Berbagai format payload
-            payloads = [
-                {'domains': domains},
-                {'domains': domains_text},
-                {'domain': domains},
-                {'domains': domains, 'format': 'json'},
-                {'data': domains},
-                {'list': domains},
-                {'urls': domains},
-            ]
-            
-            for endpoint in endpoints:
-                for payload in payloads:
-                    try:
-                        response = self.session.post(
-                            endpoint,
-                            json=payload,
-                            headers={
-                                **self.headers,
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                            },
-                            timeout=30,
-                            verify=False
-                        )
-                        
-                        if response.status_code == 200:
-                            try:
-                                data = response.json()
-                                logger.debug(f"API Response: {json.dumps(data, indent=2)[:500]}")
-                                return self._parse_api_response(data, domains)
-                            except:
-                                # Jika bukan JSON, coba parse HTML
-                                return self._parse_html_response(response.text, domains)
-                                
-                    except Exception as e:
-                        continue
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ JSON error: {e}")
-            return None
-    
-    def _check_via_form(self, domains, domains_text):
-        """Coba dengan form data"""
-        try:
-            form_data = {
-                'domains': domains_text,
-                'domain': domains_text,
-                'urls': domains_text,
-                'q': domains_text,
-                'action': 'check',
-                'submit': 'Cek',
-            }
-            
+            # Kirim request ke endpoint yang benar
             response = self.session.post(
-                self.checker_url,
-                data=form_data,
+                f"{self.checker_url}/check",
+                json={'domains': domains},
                 headers={
                     **self.headers,
-                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'X-CSRF-TOKEN': 'ukvxzVGQTWSBl5G4JnZgTFVeEuj08r49LYISmaP8',
                 },
-                timeout=30,
-                verify=False,
-                allow_redirects=True
-            )
-            
-            if response.status_code == 200:
-                return self._parse_html_response(response.text, domains)
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Form error: {e}")
-            return None
-    
-    def _check_via_get(self, domains):
-        """Coba dengan GET request"""
-        try:
-            domains_param = ",".join(domains)
-            params = {
-                'domains': domains_param,
-                'q': domains_param,
-            }
-            
-            response = self.session.get(
-                self.checker_url,
-                params=params,
-                headers=self.headers,
                 timeout=30,
                 verify=False
             )
             
             if response.status_code == 200:
-                return self._parse_html_response(response.text, domains)
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ GET error: {e}")
-            return None
-    
-    def _parse_api_response(self, data, domains):
-        """Parse JSON response dari API"""
-        blocked_domains = []
-        
-        try:
-            if isinstance(data, dict):
-                # Cari data di berbagai field
-                data_fields = ['data', 'result', 'results', 'domains', 'list', 'items']
-                
-                for field in data_fields:
-                    if field in data:
-                        items = data[field]
-                        
-                        if isinstance(items, list):
-                            for item in items:
-                                if isinstance(item, dict):
-                                    domain = self._extract_domain(item)
-                                    status = self._extract_status(item)
-                                    blocked = item.get('blocked', False) or item.get('is_blocked', False)
-                                    
-                                    if domain:
-                                        if blocked or status.lower() in ['blocked', 'terblokir', 'nawala']:
-                                            blocked_domains.append(domain)
-                                            logger.warning(f"🚫 {domain}: TERBLOKIR")
-                                        elif status.lower() in ['not blocked', 'not_blocked', 'aman', 'ok', 'clean']:
-                                            logger.info(f"✅ {domain}: AMAN")
-                                        
-                        elif isinstance(items, dict):
-                            for domain, status in items.items():
-                                if isinstance(status, dict):
-                                    blocked = status.get('blocked', False) or status.get('is_blocked', False)
-                                    status_text = status.get('status', '')
-                                    if blocked or str(status_text).lower() in ['blocked', 'terblokir']:
-                                        blocked_domains.append(domain)
-                                        logger.warning(f"🚫 {domain}: TERBLOKIR")
-                                elif str(status).lower() in ['blocked', 'terblokir', 'true', '1']:
-                                    blocked_domains.append(domain)
-                                    logger.warning(f"🚫 {domain}: TERBLOKIR")
-            
-            # Jika tidak ada yang terdeteksi sebagai blokir, semua aman
-            if not blocked_domains:
-                for domain in domains:
-                    if domain not in blocked_domains:
-                        logger.info(f"✅ {domain}: AMAN")
-            
-            return blocked_domains
-            
-        except Exception as e:
-            logger.error(f"❌ API parse error: {e}")
-            return []
-    
-    def _parse_html_response(self, html, domains):
-        """Parse HTML response"""
-        blocked_domains = []
-        
-        try:
-            html_lower = html.lower()
-            
-            # Cari status untuk setiap domain
-            for domain in domains:
-                domain_lower = domain.lower()
-                
-                if domain_lower not in html_lower:
-                    logger.info(f"✅ {domain}: Domain tidak ditemukan (asumsi aman)")
-                    continue
-                
-                # Cari konteks
-                domain_index = html_lower.find(domain_lower)
-                start = max(0, domain_index - 300)
-                end = min(len(html_lower), domain_index + 300)
-                context = html_lower[start:end]
-                
-                # Indikasi terblokir
-                blocked_patterns = [
-                    r'terblokir',
-                    r'diblokir',
-                    r'blocked',
-                    r'nawala',
-                    r'status["\']?\s*[:=]\s*["\']?blocked',
-                    r'class=["\'][^"\']*(blocked|red|danger)[^"\']*["\']',
-                    r'bg-red',
-                    r'text-red',
-                    r'border-red',
-                ]
-                
-                # Indikasi aman
-                safe_patterns = [
-                    r'aman',
-                    r'safe',
-                    r'not blocked',
-                    r'not_blocked',
-                    r'clean',
-                    r'ok',
-                    r'status["\']?\s*[:=]\s*["\']?(ok|clean|aman|not blocked)',
-                    r'class=["\'][^"\']*(success|green|safe)[^"\']*["\']',
-                    r'bg-green',
-                    r'text-green',
-                    r'border-green',
-                ]
-                
-                is_blocked = False
-                is_safe = False
-                
-                # Cek blokir
-                for pattern in blocked_patterns:
-                    if re.search(pattern, context, re.IGNORECASE):
-                        is_blocked = True
-                        break
-                
-                # Cek aman
-                for pattern in safe_patterns:
-                    if re.search(pattern, context, re.IGNORECASE):
-                        is_safe = True
-                        break
-                
-                if is_blocked and not is_safe:
-                    blocked_domains.append(domain)
-                    logger.warning(f"🚫 {domain}: TERBLOKIR")
-                elif is_safe:
-                    logger.info(f"✅ {domain}: AMAN")
+                data = response.json()
+                if data.get('success'):
+                    return self._parse_results(data.get('results', []))
                 else:
-                    # Default: aman
-                    logger.info(f"✅ {domain}: Tidak terdeteksi blokir (asumsi aman)")
-            
-            return blocked_domains
+                    logger.error(f"❌ API error: {data.get('message', 'Unknown error')}")
+                    return []
+            else:
+                logger.error(f"❌ HTTP {response.status_code}")
+                return []
             
         except Exception as e:
-            logger.error(f"❌ HTML parse error: {e}")
+            logger.error(f"❌ Error checking batch: {e}")
             return []
     
-    def _extract_domain(self, item):
-        """Extract domain dari berbagai format"""
-        for key in ['domain', 'name', 'url', 'host', 'target', 'item', 'id']:
-            if key in item:
-                return str(item[key]).strip().lower()
-        return ''
-    
-    def _extract_status(self, item):
-        """Extract status dari berbagai format"""
-        for key in ['status', 'result', 'state', 'blocked_status']:
-            if key in item:
-                return str(item[key]).strip().lower()
-        return ''
+    def _parse_results(self, results):
+        """Parse hasil dari API"""
+        blocked_domains = []
+        
+        for result in results:
+            domain = result.get('Domain', '') or result.get('domain', '')
+            is_blocked = result.get('Blocked', False)
+            
+            if domain and is_blocked:
+                blocked_domains.append(domain)
+                logger.warning(f"🚫 {domain}: DIBLOKIR")
+            elif domain:
+                logger.info(f"✅ {domain}: AMAN")
+        
+        return blocked_domains
     
     def check_all_domains(self, domains):
         """Cek semua domain dengan batch (max 100 per request)"""
@@ -381,9 +142,9 @@ class TrustPositifIDChecker:
                 blocked_batch = self.check_domains_batch(batch)
                 all_blocked.extend(blocked_batch)
                 
-                # Delay antar batch (rate limit: 1000 domain / 10 menit)
+                # Delay antar batch
                 if i + batch_size < total:
-                    delay = 10  # 10 detik antar batch untuk aman
+                    delay = 3
                     logger.info(f"⏳ Menunggu {delay} detik sebelum batch berikutnya...")
                     time.sleep(delay)
             
@@ -444,7 +205,6 @@ async def kirim_status():
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Mode:** Batch (max 100 domain/request)\n"
-            f"⏱️ **Rate Limit:** 1000 domain/10 menit\n"
             f"🌐 **Sumber:** trustpositif.id/checker\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
@@ -551,7 +311,6 @@ async def cek_domain_job():
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.ID/CHECKER")
         logger.info("🔄 Mode: Batch (max 100 domain/request)")
-        logger.info("🔄 Rate Limit: 1000 domain/10 menit")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -602,13 +361,11 @@ async def main():
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF.ID/CHECKER DOMAIN MONITORING BOT")
     print("📌 Mode: Batch (max 100 domain/request)")
-    print("📌 Rate Limit: 1000 domain/10 menit")
     print("=" * 60)
     
     logger.info("Bot starting...")
     logger.info("🌐 Source: trustpositif.id/checker")
     logger.info("📌 Mode: Batch (max 100 domain per request)")
-    logger.info("⏱️ Rate Limit: 1000 domain/10 menit")
     
     await kirim_status()
     
@@ -626,7 +383,7 @@ async def main():
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Mode: Batch (max 100 domain per request)")
-    logger.info("📍 Delay antar batch: 10 detik")
+    logger.info("📍 Delay antar batch: 3 detik")
     logger.info("📍 Source: trustpositif.id/checker")
     logger.info("📍 Press Ctrl+C to stop\n")
     
