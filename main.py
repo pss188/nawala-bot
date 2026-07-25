@@ -9,7 +9,6 @@ import json
 import re
 from telegram.ext import Application
 from datetime import datetime
-from bs4 import BeautifulSoup
 import urllib3
 
 # Disable SSL warnings
@@ -33,15 +32,7 @@ if not TOKEN or not CHAT_ID:
 # ============================================
 # PROXY DISABLED - Menggunakan koneksi langsung
 # ============================================
-USE_PROXY = False  # <--- SET FALSE UNTUK TANPA PROXY
-
-# Proxy config (tidak digunakan)
-PROXY_HOST = "95.135.92.164"
-PROXY_PORT_HTTP = "59100"
-PROXY_USERNAME = "pulsaslot1888"
-PROXY_PASSWORD = "b3Kft6IMwG"
-
-# Set proxy ke None
+USE_PROXY = False
 proxies = None
 logger.info("🔓 Using DIRECT CONNECTION (no proxy)")
 
@@ -58,9 +49,6 @@ class TrustPositifChecker:
         self.session = requests.Session()
         self.base_url = "https://trustpositif.komdigi.go.id"
         
-        # Tidak menggunakan proxy
-        # self.session.proxies.update(proxies)  # Dikomentari
-        
         # Headers
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -75,7 +63,7 @@ class TrustPositifChecker:
         self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
     
     def _get_csrf_token(self):
-        """Fetch CSRF token"""
+        """Fetch CSRF token using regex (no BeautifulSoup)"""
         try:
             logger.info("🔄 Fetching CSRF token...")
             response = self.session.get(
@@ -86,22 +74,18 @@ class TrustPositifChecker:
             )
             
             if response.status_code == 200:
-                # Cari dengan BeautifulSoup
-                try:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    csrf_input = soup.find('input', {'name': 'csrf_token'})
-                    if csrf_input and csrf_input.get('value'):
-                        token = csrf_input.get('value')
-                        logger.info(f"✅ CSRF token fetched: {token[:10]}...")
-                        return token
-                except:
-                    pass
-                
-                # Fallback dengan regex
+                # Cari CSRF token dengan regex
                 match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
                 if match:
                     token = match.group(1)
-                    logger.info(f"✅ CSRF token fetched (regex): {token[:10]}...")
+                    logger.info(f"✅ CSRF token fetched: {token[:10]}...")
+                    return token
+                
+                # Coba pattern lain
+                match = re.search(r'csrf_token" value="([^"]+)"', response.text)
+                if match:
+                    token = match.group(1)
+                    logger.info(f"✅ CSRF token fetched (alt): {token[:10]}...")
                     return token
             
             logger.warning("⚠️ Gagal fetch CSRF token, menggunakan default")
@@ -178,6 +162,7 @@ class TrustPositifChecker:
         blocked_domains = []
         
         try:
+            # Coba parse JSON
             result = json.loads(response_text)
             
             if 'values' in result:
@@ -205,33 +190,46 @@ class TrustPositifChecker:
             return blocked_domains
             
         except json.JSONDecodeError:
+            # Jika bukan JSON, parse HTML dengan regex
             return self.parse_html_response(response_text, original_domains)
         except Exception as e:
             logger.error(f"❌ Parse error: {e}")
             return []
     
     def parse_html_response(self, html, domains):
-        """Parse HTML response (fallback)"""
+        """Parse HTML response using regex (no BeautifulSoup)"""
         blocked_domains = []
         
         try:
-            soup = BeautifulSoup(html, 'html.parser')
-            table = soup.find('table')
+            # Cari tabel dengan regex
+            # Pattern untuk mencari <td>domain</td><td>status</td>
+            table_pattern = r'<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>'
+            matches = re.findall(table_pattern, html, re.IGNORECASE | re.DOTALL)
             
-            if table:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all('td')
-                    if len(cells) >= 2:
-                        domain = cells[0].text.strip().lower()
-                        status = cells[1].text.strip()
-                        
-                        if domain and status and status.lower() != 'tidak ada':
-                            for original_domain in domains:
-                                if original_domain.lower() == domain:
-                                    blocked_domains.append(f"{original_domain} ({status})")
-                                    logger.warning(f"🚫 HTML: {original_domain} -> {status}")
-                                    break
+            for match in matches:
+                domain = match[0].strip().lower()
+                status = match[1].strip()
+                
+                if domain and status and status.lower() != 'tidak ada':
+                    for original_domain in domains:
+                        if original_domain.lower() == domain:
+                            blocked_domains.append(f"{original_domain} ({status})")
+                            logger.warning(f"🚫 HTML: {original_domain} -> {status}")
+                            break
+            
+            # Jika tidak ketemu dengan pattern di atas, coba cari domain di HTML
+            if not blocked_domains:
+                for domain in domains:
+                    domain_lower = domain.lower()
+                    if domain_lower in html.lower():
+                        # Cari status di sekitar domain
+                        pattern = f'{re.escape(domain_lower)}.*?<td[^>]*>(.*?)</td>'
+                        match = re.search(pattern, html.lower(), re.DOTALL)
+                        if match:
+                            status = match.group(1).strip()
+                            if status and status != 'tidak ada':
+                                blocked_domains.append(f"{domain} ({status})")
+                                logger.warning(f"🚫 HTML: {domain} -> {status}")
         
         except Exception as e:
             logger.error(f"❌ HTML parse error: {e}")
@@ -300,7 +298,7 @@ def baca_domain():
         return []
 
 # ============================================
-# FUNGSI UNTUK TELEGRAM (Tidak berubah)
+# FUNGSI TELEGRAM
 # ============================================
 
 async def kirim_status():
@@ -536,7 +534,7 @@ if __name__ == "__main__":
         logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
     except ImportError as e:
         logger.error(f"❌ Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install -r requirements.txt")
+        logger.info("💡 Install dengan: pip install requests schedule python-telegram-bot")
         sys.exit(1)
     
     try:
