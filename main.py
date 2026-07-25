@@ -37,37 +37,140 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-class TrustPositifChecker:
+class NawalaChecker:
     def __init__(self):
         self.session = requests.Session()
-        self.base_url = "https://trustpositif.infonawala.com"
+        self.base_url = "https://nawala.online"
+        self.api_url = "https://nawala.online/api/check"  # Endpoint API yang mungkin
         
-        # Headers lengkap seperti browser
+        # Headers untuk meniru browser
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
-            'Cache-Control': 'max-age=0',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-User': '?1',
         }
+        
+        # Track rate limit
+        self.last_request_time = 0
+        self.request_count = 0
+        self.rate_limit_window = 300  # 5 menit
+        self.max_requests_per_window = 10
+    
+    def _check_rate_limit(self):
+        """Cek dan tunggu jika melewati rate limit"""
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        
+        # Reset counter jika sudah melewati window
+        if time_since_last > self.rate_limit_window:
+            self.request_count = 0
+            self.last_request_time = current_time
+        
+        # Jika sudah mencapai limit, tunggu
+        if self.request_count >= self.max_requests_per_window:
+            wait_time = self.rate_limit_window - time_since_last + 5
+            logger.info(f"⏳ Rate limit tercapai, menunggu {wait_time:.0f} detik...")
+            time.sleep(wait_time)
+            self.request_count = 0
+            self.last_request_time = time.time()
     
     def check_single_domain(self, domain):
-        """Cek 1 domain secara individual dengan submit form"""
+        """Cek 1 domain secara individual"""
         try:
             logger.info(f"🔍 Checking domain: {domain}")
             
-            # Kirim POST request dengan form data
+            # Cek rate limit
+            self._check_rate_limit()
+            
+            # Coba berbagai pendekatan
+            
+            # Pendekatan 1: API JSON
+            result = self._check_via_api(domain)
+            if result is not None:
+                self.request_count += 1
+                self.last_request_time = time.time()
+                return result
+            
+            # Pendekatan 2: Form submit
+            result = self._check_via_form(domain)
+            if result is not None:
+                self.request_count += 1
+                self.last_request_time = time.time()
+                return result
+            
+            # Pendekatan 3: GET dengan query
+            result = self._check_via_get(domain)
+            if result is not None:
+                self.request_count += 1
+                self.last_request_time = time.time()
+                return result
+            
+            logger.warning(f"⚠️ Semua pendekatan gagal untuk {domain}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking domain {domain}: {e}")
+            return None
+    
+    def _check_via_api(self, domain):
+        """Coba dengan API JSON"""
+        try:
+            # Payload yang mungkin
+            payloads = [
+                {'domain': domain},
+                {'domains': [domain]},
+                {'url': domain},
+                {'q': domain},
+                {'check': domain},
+            ]
+            
+            for payload in payloads:
+                try:
+                    response = self.session.post(
+                        self.api_url,
+                        json=payload,
+                        headers={
+                            **self.headers,
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                        },
+                        timeout=15,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            logger.debug(f"API Response: {json.dumps(data, indent=2)}")
+                            return self._parse_api_response(data, domain)
+                        except:
+                            # Jika bukan JSON, coba parse HTML
+                            return self._parse_html_response(response.text, domain)
+                            
+                except Exception as e:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ API error: {e}")
+            return None
+    
+    def _check_via_form(self, domain):
+        """Coba dengan form submit"""
+        try:
             form_data = {
                 'domain': domain,
                 'domains': domain,
+                'url': domain,
+                'q': domain,
             }
             
             response = self.session.post(
@@ -77,103 +180,166 @@ class TrustPositifChecker:
                     **self.headers,
                     'Content-Type': 'application/x-www-form-urlencoded',
                 },
-                timeout=30,
-                verify=False,
-                allow_redirects=True
+                timeout=15,
+                verify=False
             )
             
-            logger.debug(f"Response status: {response.status_code}")
-            logger.debug(f"Response URL: {response.url}")
-            
             if response.status_code == 200:
-                return self._parse_result(response.text, domain)
-            else:
-                logger.warning(f"⚠️ Response status: {response.status_code}")
-                return None
+                return self._parse_html_response(response.text, domain)
+            
+            return None
             
         except Exception as e:
-            logger.error(f"❌ Error checking domain {domain}: {e}")
+            logger.error(f"❌ Form error: {e}")
             return None
     
-    def _parse_result(self, html, domain):
-        """Parse hasil dari HTML response"""
+    def _check_via_get(self, domain):
+        """Coba dengan GET request"""
         try:
-            # Cari status di HTML
-            patterns = [
-                # Pattern untuk status Nawala
-                r'Status Nawala:\s*<span[^>]*>(.*?)</span>',
-                r'Status Nawala[^<]*</h3>\s*<p[^>]*>(.*?)</p>',
-                r'<div[^>]*class="[^"]*red[^"]*"[^>]*>.*?NAWALA.*?</div>',
-                r'<span[^>]*class="[^"]*text-red[^"]*"[^>]*>(.*?)</span>',
-                # Pattern untuk status di card
-                r'<h3[^>]*class="[^"]*font-semibold[^"]*"[^>]*>.*?Status Nawala[^:]*:\s*<span[^>]*>(.*?)</span>',
-                r'<p[^>]*class="[^"]*text-xs[^"]*"[^>]*>.*?(terblokir|diblokir|NAWALA|blocked).*?</p>',
-                # Pattern untuk div hasil
-                r'<div[^>]*class="[^"]*border-red[^"]*"[^>]*>.*?(NAWALA|terblokir|diblokir|blocked).*?</div>',
-                r'<div[^>]*class="[^"]*bg-red[^"]*"[^>]*>.*?(NAWALA|terblokir|diblokir|blocked).*?</div>',
-            ]
+            params = {'domain': domain, 'q': domain}
             
+            response = self.session.get(
+                self.base_url,
+                params=params,
+                headers=self.headers,
+                timeout=15,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                return self._parse_html_response(response.text, domain)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ GET error: {e}")
+            return None
+    
+    def _parse_api_response(self, data, domain):
+        """Parse JSON response dari API"""
+        try:
+            domain_lower = domain.lower()
+            
+            if isinstance(data, dict):
+                # Format 1: {'status': 'blocked' atau 'not blocked', 'domain': 'example.com'}
+                if 'status' in data and 'domain' in data:
+                    if data['domain'].lower() == domain_lower:
+                        status = str(data['status']).lower()
+                        if status in ['blocked', 'terblokir', 'true']:
+                            logger.warning(f"🚫 {domain}: TERBLOKIR")
+                            return True
+                        elif status in ['not blocked', 'not_blocked', 'ok', 'aman', 'false']:
+                            logger.info(f"✅ {domain}: AMAN")
+                            return False
+                
+                # Format 2: {'result': {'domain': 'example.com', 'blocked': true/false}}
+                if 'result' in data and isinstance(data['result'], dict):
+                    result = data['result']
+                    if result.get('domain', '').lower() == domain_lower:
+                        blocked = result.get('blocked', False)
+                        status = str(result.get('status', '')).lower()
+                        
+                        if blocked or status in ['blocked', 'terblokir']:
+                            logger.warning(f"🚫 {domain}: TERBLOKIR")
+                            return True
+                        else:
+                            logger.info(f"✅ {domain}: AMAN")
+                            return False
+                
+                # Format 3: {'data': [{'domain': 'example.com', 'status': 'blocked'}]}
+                if 'data' in data and isinstance(data['data'], list):
+                    for item in data['data']:
+                        if isinstance(item, dict):
+                            if item.get('domain', '').lower() == domain_lower:
+                                status = str(item.get('status', '')).lower()
+                                blocked = item.get('blocked', False)
+                                
+                                if blocked or status in ['blocked', 'terblokir']:
+                                    logger.warning(f"🚫 {domain}: TERBLOKIR")
+                                    return True
+                                else:
+                                    logger.info(f"✅ {domain}: AMAN")
+                                    return False
+            
+            # Cek di JSON string
+            json_str = json.dumps(data).lower()
+            if domain_lower in json_str:
+                if 'blocked' in json_str or 'terblokir' in json_str:
+                    # Cek konteks
+                    domain_index = json_str.find(domain_lower)
+                    context = json_str[domain_index:domain_index+200]
+                    if 'blocked' in context or 'terblokir' in context:
+                        logger.warning(f"🚫 {domain}: TERBLOKIR (dari JSON string)")
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ API parse error: {e}")
+            return None
+    
+    def _parse_html_response(self, html, domain):
+        """Parse HTML response"""
+        try:
             html_lower = html.lower()
             domain_lower = domain.lower()
             
-            # Cek apakah domain ada di response
+            # Cari domain di HTML
             if domain_lower not in html_lower:
-                logger.info(f"✅ {domain}: Domain tidak ditemukan di response (asumsi aman)")
+                logger.info(f"✅ {domain}: Domain tidak ditemukan (asumsi aman)")
                 return False
             
             # Cari status
-            for pattern in patterns:
-                match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
-                if match:
-                    status_text = match.group(1).strip().lower() if match.groups() else match.group(0).strip().lower()
-                    logger.debug(f"Status pattern found: {status_text}")
-                    
-                    # Cek indikasi terblokir
-                    if 'nawala' in status_text or 'terblokir' in status_text or 'diblokir' in status_text or 'blocked' in status_text:
-                        logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA)")
-                        return True
-                    elif 'aman' in status_text or 'safe' in status_text or 'allowed' in status_text:
-                        logger.info(f"✅ {domain}: AMAN")
-                        return False
+            status_patterns = [
+                # Pattern untuk "Not Blocked" atau "Blocked"
+                r'status["\']?\s*[:=]\s*["\']?(not blocked|blocked|terblokir|aman)["\']?',
+                r'<span[^>]*class=["\'][^"\']*(status|result)[^"\']*["\'][^>]*>(.*?)</span>',
+                r'<div[^>]*class=["\'][^"\']*(status|result)[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<p[^>]*>(.*?blocked.*?)</p>',
+                r'<p[^>]*>(.*?not blocked.*?)</p>',
+                r'<p[^>]*>(.*?terblokir.*?)</p>',
+                r'<p[^>]*>(.*?aman.*?)</p>',
+            ]
             
-            # Cek langsung di HTML untuk kata kunci
-            # Cari div dengan status
-            status_div_pattern = r'<div[^>]*class="[^"]*(?:red|danger|error)[^"]*"[^>]*>(.*?)</div>'
-            matches = re.findall(status_div_pattern, html, re.IGNORECASE | re.DOTALL)
-            
-            for match in matches:
-                if domain_lower in match.lower():
-                    if 'nawala' in match.lower() or 'terblokir' in match.lower() or 'diblokir' in match.lower():
-                        logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA)")
-                        return True
-            
-            # Cek apakah ada teks "NAWALA" di dekat domain
+            # Cari di konteks
             domain_index = html_lower.find(domain_lower)
             if domain_index != -1:
-                start = max(0, domain_index - 500)
-                end = min(len(html_lower), domain_index + 500)
+                start = max(0, domain_index - 300)
+                end = min(len(html_lower), domain_index + 300)
                 context = html_lower[start:end]
                 
-                if 'nawala' in context or 'terblokir' in context or 'diblokir' in context:
-                    logger.warning(f"🚫 {domain}: TERBLOKIR (NAWALA terdeteksi di konteks)")
-                    return True
-                elif 'aman' in context or 'safe' in context:
-                    logger.info(f"✅ {domain}: AMAN")
-                    return False
+                # Cek indikasi blokir
+                blocked_keywords = ['blocked', 'terblokir', 'diblokir']
+                safe_keywords = ['not blocked', 'not_blocked', 'aman', 'ok', 'clean']
+                
+                for keyword in blocked_keywords:
+                    if keyword in context:
+                        logger.warning(f"🚫 {domain}: TERBLOKIR")
+                        return True
+                
+                for keyword in safe_keywords:
+                    if keyword in context:
+                        logger.info(f"✅ {domain}: AMAN")
+                        return False
             
             # Default: aman
             logger.info(f"✅ {domain}: Tidak terdeteksi blokir (asumsi aman)")
             return False
             
         except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
+            logger.error(f"❌ HTML parse error: {e}")
             return None
     
     def check_all_domains(self, domains):
-        """Cek semua domain satu per satu"""
+        """Cek semua domain satu per satu dengan rate limit"""
         try:
             if not domains:
                 return []
+            
+            # Batasi maksimal 10 domain per batch (sesuai rate limit)
+            if len(domains) > 10:
+                logger.warning(f"⚠️ Maksimal 10 domain per request, hanya 10 pertama yang dicek")
+                domains = domains[:10]
             
             all_blocked = []
             total = len(domains)
@@ -202,10 +368,10 @@ class TrustPositifChecker:
                 
                 logger.info("-" * 40)
                 
-                # Delay antar domain
+                # Delay antar domain (rate limit: 10 per 5 menit)
                 if i < total:
-                    delay = 2
-                    logger.info(f"⏳ Menunggu {delay} detik...")
+                    delay = 30  # 30 detik antar domain untuk aman
+                    logger.info(f"⏳ Menunggu {delay} detik (rate limit)...")
                     time.sleep(delay)
             
             return all_blocked
@@ -259,13 +425,18 @@ async def kirim_status():
         domains = baca_domain()
         domain_count = len(domains)
         
+        # Batasi 10 domain
+        if domain_count > 10:
+            domain_count = 10
+        
         message = (
-            "🤖 *TrustPositif Checker Bot*\n\n"
+            "🤖 *Nawala.online Monitoring Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Mode:** 1 domain/request\n"
-            f"🌐 **Sumber:** trustpositif.infonawala.com\n\n"
+            f"⏱️ **Rate Limit:** 10 domain/5 menit\n"
+            f"🌐 **Sumber:** nawala.online\n\n"
             "_Bot akan mengecek domain satu per satu setiap 15 menit_"
         )
         
@@ -286,7 +457,7 @@ async def kirim_laporan(blocked_domains, total_domains):
         
         if blocked_count == 0:
             message = (
-                "✅ *LAPORAN CEK TRUSTPOSITIF*\n\n"
+                "✅ *LAPORAN CEK NAWALA*\n\n"
                 "**SEMUA DOMAIN AMAN!** 🎉\n\n"
                 f"📊 **Total Domain:** {total_domains}\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
@@ -311,7 +482,7 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: trustpositif.infonawala.com_"
+                "_Sumber: nawala.online_"
             )
             
             if len(message) > 4096:
@@ -348,7 +519,7 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
                 message += (
                     f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                     f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: trustpositif.infonawala.com_"
+                    "_Sumber: nawala.online_"
                 )
             
             await application.bot.send_message(
@@ -369,8 +540,9 @@ async def cek_domain_job():
     """Job untuk mengecek domain satu per satu"""
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.INFONAWALA.COM")
+        logger.info("🔄 MEMULAI PEMERIKSAAN NAWALA.ONLINE")
         logger.info("🔄 Mode: 1 domain per request")
+        logger.info("🔄 Rate Limit: 10 domain/5 menit")
         logger.info("=" * 60)
         
         domains = baca_domain()
@@ -378,9 +550,14 @@ async def cek_domain_job():
             logger.warning("⚠️ Tidak ada domain untuk dicek")
             return
         
+        # Batasi 10 domain
+        if len(domains) > 10:
+            logger.warning(f"⚠️ Maksimal 10 domain, hanya 10 pertama yang dicek")
+            domains = domains[:10]
+        
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = TrustPositifChecker()
+        checker = NawalaChecker()
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -419,13 +596,15 @@ async def schedule_runner():
 async def main():
     """Main function"""
     print("\n" + "=" * 60)
-    print("🚀 TRUSTPOSITIF.INFONAWALA.COM DOMAIN MONITORING BOT")
+    print("🚀 NAWALA.ONLINE DOMAIN MONITORING BOT")
     print("📌 Mode: 1 domain per request")
+    print("📌 Rate Limit: 10 domain/5 menit")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🌐 Source: trustpositif.infonawala.com")
+    logger.info("🌐 Source: nawala.online")
     logger.info("📌 Mode: 1 domain per request")
+    logger.info("⏱️ Rate Limit: 10 domain/5 menit")
     
     await kirim_status()
     
@@ -443,8 +622,9 @@ async def main():
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Mode: 1 domain per request")
-    logger.info("📍 Delay antar domain: 2 detik")
-    logger.info("📍 Source: trustpositif.infonawala.com")
+    logger.info("📍 Delay antar domain: 30 detik (rate limit)")
+    logger.info("📍 Max domain per check: 10")
+    logger.info("📍 Source: nawala.online")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
