@@ -30,11 +30,45 @@ if not TOKEN or not CHAT_ID:
     sys.exit(1)
 
 # ============================================
-# PROXY DISABLED - Menggunakan koneksi langsung
+# PROXY CONFIGURATION - MULTIPLE PROXY OPTIONS
 # ============================================
-USE_PROXY = False
-proxies = None
-logger.info("🔓 Using DIRECT CONNECTION (no proxy)")
+
+# Daftar proxy yang bisa dicoba (ganti dengan proxy yang valid)
+PROXY_LIST = [
+   ("95.135.92.164", "59100", "pulsaslot1888", "b3Kft6IMwG"),
+    ("193.5.64.24", "59100", "pulsaslot1888", "b3Kft6IMwG")
+]
+
+# Proxy dari environment
+ENV_PROXY_HOST = os.getenv("PROXY_HOST", "")
+ENV_PROXY_PORT = os.getenv("PROXY_PORT", "")
+ENV_PROXY_USER = os.getenv("PROXY_USER", "")
+ENV_PROXY_PASS = os.getenv("PROXY_PASS", "")
+
+if ENV_PROXY_HOST and ENV_PROXY_PORT:
+    PROXY_LIST.append((ENV_PROXY_HOST, ENV_PROXY_PORT, ENV_PROXY_USER, ENV_PROXY_PASS))
+
+# Tambahkan proxy gratis (tidak stabil, tapi bisa dicoba)
+FREE_PROXIES = [
+    # Proxy Indonesia (ganti dengan yang aktif)
+    # Cek di: https://free-proxy-list.net/ atau https://www.sslproxies.org/
+]
+
+PROXY_LIST.extend(FREE_PROXIES)
+
+logger.info(f"📋 {len(PROXY_LIST)} proxy tersedia untuk dicoba")
+
+def get_proxy_dict(host, port, username="", password=""):
+    """Buat dictionary proxy"""
+    if username and password:
+        proxy_url = f"http://{username}:{password}@{host}:{port}"
+    else:
+        proxy_url = f"http://{host}:{port}"
+    
+    return {
+        'http': proxy_url,
+        'https': proxy_url,
+    }
 
 # Bot setup
 try:
@@ -45,9 +79,17 @@ except Exception as e:
     sys.exit(1)
 
 class TrustPositifChecker:
-    def __init__(self):
+    def __init__(self, proxy_config=None):
         self.session = requests.Session()
         self.base_url = "https://trustpositif.komdigi.go.id"
+        self.proxy_config = proxy_config
+        
+        # Set proxy jika ada
+        if proxy_config:
+            self.session.proxies.update(proxy_config)
+            logger.info(f"🔑 Menggunakan proxy: {proxy_config.get('http', 'unknown')}")
+        else:
+            logger.info("🔓 Koneksi langsung (tanpa proxy)")
         
         # Headers
         self.headers = {
@@ -63,13 +105,13 @@ class TrustPositifChecker:
         self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
     
     def _get_csrf_token(self):
-        """Fetch CSRF token using regex (no BeautifulSoup)"""
+        """Fetch CSRF token"""
         try:
             logger.info("🔄 Fetching CSRF token...")
             response = self.session.get(
                 self.base_url,
                 headers=self.headers,
-                timeout=20,
+                timeout=30,
                 verify=False
             )
             
@@ -81,7 +123,6 @@ class TrustPositifChecker:
                     logger.info(f"✅ CSRF token fetched: {token[:10]}...")
                     return token
                 
-                # Coba pattern lain
                 match = re.search(r'csrf_token" value="([^"]+)"', response.text)
                 if match:
                     token = match.group(1)
@@ -162,7 +203,6 @@ class TrustPositifChecker:
         blocked_domains = []
         
         try:
-            # Coba parse JSON
             result = json.loads(response_text)
             
             if 'values' in result:
@@ -190,19 +230,17 @@ class TrustPositifChecker:
             return blocked_domains
             
         except json.JSONDecodeError:
-            # Jika bukan JSON, parse HTML dengan regex
             return self.parse_html_response(response_text, original_domains)
         except Exception as e:
             logger.error(f"❌ Parse error: {e}")
             return []
     
     def parse_html_response(self, html, domains):
-        """Parse HTML response using regex (no BeautifulSoup)"""
+        """Parse HTML response using regex"""
         blocked_domains = []
         
         try:
             # Cari tabel dengan regex
-            # Pattern untuk mencari <td>domain</td><td>status</td>
             table_pattern = r'<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>'
             matches = re.findall(table_pattern, html, re.IGNORECASE | re.DOTALL)
             
@@ -217,12 +255,10 @@ class TrustPositifChecker:
                             logger.warning(f"🚫 HTML: {original_domain} -> {status}")
                             break
             
-            # Jika tidak ketemu dengan pattern di atas, coba cari domain di HTML
             if not blocked_domains:
                 for domain in domains:
                     domain_lower = domain.lower()
                     if domain_lower in html.lower():
-                        # Cari status di sekitar domain
                         pattern = f'{re.escape(domain_lower)}.*?<td[^>]*>(.*?)</td>'
                         match = re.search(pattern, html.lower(), re.DOTALL)
                         if match:
@@ -250,7 +286,6 @@ class TrustPositifChecker:
                 blocked_batch = self.check_batch_5_domains(batch)
                 all_blocked.extend(blocked_batch)
                 
-                # Delay antar batch
                 if i + batch_size < len(domains):
                     logger.info("⏳ Menunggu 3 detik sebelum batch berikutnya...")
                     time.sleep(3)
@@ -261,12 +296,70 @@ class TrustPositifChecker:
             logger.error(f"❌ Error checking all domains: {e}")
             return []
 
+def test_proxy(proxy_config):
+    """Test apakah proxy bisa mengakses TrustPositif"""
+    try:
+        session = requests.Session()
+        session.proxies.update(proxy_config)
+        
+        response = session.get(
+            "https://trustpositif.komdigi.go.id/",
+            timeout=15,
+            verify=False,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        )
+        
+        if response.status_code == 200 and 'TrustPositif' in response.text:
+            logger.info(f"✅ Proxy BERHASIL: {proxy_config.get('http', 'unknown')}")
+            return True
+        else:
+            logger.warning(f"❌ Proxy GAGAL: {proxy_config.get('http', 'unknown')} - Status: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.warning(f"❌ Proxy GAGAL: {proxy_config.get('http', 'unknown')} - {str(e)[:50]}")
+        return False
+
+def find_working_proxy():
+    """Cari proxy yang bekerja"""
+    logger.info("🔍 Mencari proxy yang bekerja...")
+    
+    # Coba tanpa proxy dulu
+    logger.info("🔄 Mencoba koneksi langsung...")
+    try:
+        response = requests.get(
+            "https://trustpositif.komdigi.go.id/",
+            timeout=15,
+            verify=False,
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        if response.status_code == 200 and 'TrustPositif' in response.text:
+            logger.info("✅ Koneksi langsung BERHASIL!")
+            return None
+    except:
+        pass
+    
+    # Coba semua proxy
+    for host, port, username, password in PROXY_LIST:
+        proxy_dict = get_proxy_dict(host, port, username, password)
+        logger.info(f"🔄 Mencoba proxy: {host}:{port}")
+        
+        if test_proxy(proxy_dict):
+            return proxy_dict
+        
+        # Delay antar percobaan
+        time.sleep(1)
+    
+    logger.error("❌ Tidak ada proxy yang bekerja!")
+    return None
+
 def baca_domain():
     """Baca domain dari file domain.txt"""
     try:
         if not os.path.exists("domain.txt"):
             logger.error("❌ File domain.txt tidak ditemukan!")
-            # Buat file contoh
             with open("domain.txt", "w") as f:
                 f.write("# Daftar domain untuk dicek\n")
                 f.write("# Satu domain per baris\n")
@@ -281,7 +374,6 @@ def baca_domain():
             for line in f:
                 line = line.strip()
                 if line and not line.startswith('#'):
-                    # Bersihkan domain
                     line = line.lower()
                     for prefix in ['http://', 'https://', 'www.']:
                         if line.startswith(prefix):
@@ -314,7 +406,7 @@ async def kirim_status():
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Batch:** 5 domain/request\n"
-            f"🔓 **Koneksi:** Langsung (tanpa proxy)\n\n"
+            f"🔑 **Proxy:** {'Menggunakan proxy' if working_proxy else 'Langsung'}\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -427,7 +519,8 @@ async def cek_domain_job():
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = TrustPositifChecker()
+        # Gunakan proxy yang sudah ditemukan
+        checker = TrustPositifChecker(working_proxy)
         
         start_time = time.time()
         blocked_domains = checker.check_all_domains(domains)
@@ -463,46 +556,24 @@ async def schedule_runner():
             logger.error(f"❌ Error dalam schedule runner: {e}")
             await asyncio.sleep(5)
 
-async def test_koneksi():
-    """Test koneksi ke trustpositif.komdigi.go.id"""
-    try:
-        logger.info("🔗 Testing koneksi ke trustpositif.komdigi.go.id...")
-        
-        response = requests.get(
-            "https://trustpositif.komdigi.go.id/",
-            timeout=10,
-            verify=False
-        )
-        
-        if response.status_code == 200:
-            if 'TrustPositif' in response.text:
-                logger.info("✅ Koneksi BERHASIL - TrustPositif terdeteksi")
-                return True
-            else:
-                logger.warning("⚠️ Koneksi OK tapi halaman tidak sesuai")
-                return False
-        else:
-            logger.warning(f"⚠️ HTTP Status: {response.status_code}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Test koneksi GAGAL: {e}")
-        return False
-
 async def main():
     """Main function"""
+    global working_proxy
+    
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF KOMINFO DOMAIN MONITORING BOT")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info("🔓 Using DIRECT CONNECTION (no proxy)")
     
-    # Test koneksi
-    if not await test_koneksi():
-        logger.warning("⚠️ Koneksi bermasalah, bot tetap berjalan...")
+    # Cari proxy yang bekerja
+    working_proxy = find_working_proxy()
+    
+    if working_proxy:
+        logger.info(f"✅ Proxy ditemukan: {working_proxy.get('http', 'unknown')}")
     else:
-        logger.info("✅ Koneksi OK")
+        logger.warning("⚠️ Tidak ada proxy yang bekerja, mencoba koneksi langsung...")
+        working_proxy = None
     
     await kirim_status()
     
@@ -521,10 +592,12 @@ async def main():
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
     logger.info("📍 Batch size: 5 domains per request")
-    logger.info("📍 Connection: Direct (no proxy)")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
+
+# Global variable
+working_proxy = None
 
 if __name__ == "__main__":
     try:
