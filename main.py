@@ -6,6 +6,7 @@ import logging
 import schedule
 import json
 import re
+import socket
 from telegram.ext import Application
 from datetime import datetime
 import requests
@@ -37,7 +38,7 @@ if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
 
-# Setup proxy
+# Setup proxy untuk requests
 proxies = None
 if USE_PROXY and PROXY_HOST and PROXY_PORT:
     if PROXY_TYPE.lower() == "socks5":
@@ -84,6 +85,50 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
+def baca_domain():
+    """Baca domain dari file domain.txt"""
+    try:
+        # Cek apakah file domain.txt ada
+        if not os.path.exists("domain.txt"):
+            logger.error("❌ File domain.txt tidak ditemukan!")
+            logger.info("📝 Membuat file domain.txt contoh...")
+            with open("domain.txt", "w") as f:
+                f.write("# Daftar domain untuk dicek\n")
+                f.write("# Satu domain per baris\n")
+                f.write("google.com\n")
+                f.write("facebook.com\n")
+                f.write("twitter.com\n")
+            return []
+        
+        domains = []
+        with open("domain.txt", "r") as f:
+            for line in f:
+                line = line.strip()
+                # Skip komentar dan baris kosong
+                if line and not line.startswith('#'):
+                    line = line.lower()
+                    # Hapus protocol
+                    for prefix in ['http://', 'https://', 'www.']:
+                        if line.startswith(prefix):
+                            line = line[len(prefix):]
+                    line = line.rstrip('/')
+                    # Validasi domain sederhana
+                    if '.' in line and len(line) > 3:
+                        domains.append(line)
+        
+        if domains:
+            logger.info(f"📖 Membaca {len(domains)} domain dari domain.txt")
+            for domain in domains:
+                logger.info(f"   - {domain}")
+        else:
+            logger.warning("⚠️ Tidak ada domain ditemukan di domain.txt")
+        
+        return domains
+        
+    except Exception as e:
+        logger.error(f"Error membaca domain: {e}")
+        return []
+
 class TrustPositifChecker:
     def __init__(self):
         self.base_url = "https://trustpositif.id"
@@ -114,7 +159,6 @@ class TrustPositifChecker:
             
             logger.info(f"🔍 Checking {len(domains)} domains...")
             
-            # Kirim request ke API
             response = self.session.post(
                 f"{self.checker_url}/check",
                 json={'domains': domains},
@@ -132,10 +176,41 @@ class TrustPositifChecker:
                     return []
             else:
                 logger.error(f"HTTP {response.status_code}")
+                # Jika 403 dan pakai proxy, coba tanpa proxy
+                if response.status_code == 403 and proxies:
+                    logger.warning("⚠️ Proxy ditolak, mencoba tanpa proxy...")
+                    fallback_session = requests.Session()
+                    fallback_response = fallback_session.post(
+                        f"{self.checker_url}/check",
+                        json={'domains': domains},
+                        headers=self.headers,
+                        timeout=30,
+                        verify=False
+                    )
+                    if fallback_response.status_code == 200:
+                        data = fallback_response.json()
+                        if data.get('success'):
+                            return self._parse_results(data.get('results', []))
                 return []
                 
         except requests.exceptions.ProxyError as e:
             logger.error(f"Proxy error: {e}")
+            try:
+                logger.warning("🔄 Mencoba tanpa proxy...")
+                fallback_session = requests.Session()
+                response = fallback_session.post(
+                    f"{self.checker_url}/check",
+                    json={'domains': domains},
+                    headers=self.headers,
+                    timeout=30,
+                    verify=False
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success'):
+                        return self._parse_results(data.get('results', []))
+            except:
+                pass
             return []
         except Exception as e:
             logger.error(f"Error: {e}")
@@ -186,46 +261,11 @@ class TrustPositifChecker:
             logger.error(f"Error: {e}")
             return []
 
-def baca_domain():
-    """Baca domain dari file domain.txt"""
-    try:
-        if not os.path.exists("domain.txt"):
-            logger.error("❌ File domain.txt tidak ditemukan!")
-            with open("domain.txt", "w") as f:
-                f.write("# Daftar domain untuk dicek\n")
-                f.write("# Satu domain per baris\n")
-                f.write("google.com\n")
-                f.write("facebook.com\n")
-                f.write("twitter.com\n")
-            logger.info("✅ File domain.txt dibuat dengan contoh")
-            return []
-        
-        domains = []
-        with open("domain.txt", "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    line = line.lower()
-                    for prefix in ['http://', 'https://', 'www.']:
-                        if line.startswith(prefix):
-                            line = line[len(prefix):]
-                    line = line.rstrip('/')
-                    if '.' in line and len(line) > 3:
-                        domains.append(line)
-        
-        logger.info(f"📖 Membaca {len(domains)} domain dari domain.txt")
-        return domains
-        
-    except Exception as e:
-        logger.error(f"Error membaca domain: {e}")
-        return []
-
 # ============================================
 # FUNGSI TELEGRAM
 # ============================================
 
 async def kirim_status():
-    """Kirim status bot"""
     try:
         waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
         domains = baca_domain()
@@ -255,7 +295,6 @@ async def kirim_status():
         logger.error(f"Gagal kirim status: {e}")
 
 async def kirim_laporan(blocked_domains, total_domains):
-    """Kirim laporan hasil pengecekan"""
     try:
         blocked_count = len(blocked_domains)
         
@@ -303,7 +342,6 @@ async def kirim_laporan(blocked_domains, total_domains):
         logger.error(f"Gagal kirim laporan: {e}")
 
 async def kirim_pesan_terbagi(blocked_domains, total_domains):
-    """Kirim pesan terbagi jika terlalu panjang"""
     try:
         blocked_count = len(blocked_domains)
         chunk_size = 20
@@ -341,7 +379,6 @@ async def kirim_pesan_terbagi(blocked_domains, total_domains):
         logger.error(f"Gagal kirim pesan terbagi: {e}")
 
 async def cek_domain_job():
-    """Job untuk mengecek domain"""
     try:
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF.ID")
@@ -375,11 +412,9 @@ async def cek_domain_job():
         logger.error(traceback.format_exc())
 
 def run_async_job(job_func):
-    """Wrapper untuk menjalankan async job dari schedule"""
     asyncio.create_task(job_func())
 
 async def schedule_runner():
-    """Menjalankan schedule dalam loop asyncio"""
     while True:
         try:
             schedule.run_pending()
@@ -392,7 +427,6 @@ async def schedule_runner():
             await asyncio.sleep(5)
 
 async def main():
-    """Main function"""
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF.ID CHECKER BOT")
     print(f"📌 Proxy: {'AKTIF' if USE_PROXY else 'NONAKTIF'}")
@@ -402,6 +436,10 @@ async def main():
     
     logger.info("Bot starting...")
     logger.info("🌐 Source: trustpositif.id/checker")
+    
+    # Cek domain.txt
+    domains = baca_domain()
+    logger.info(f"📊 Total domain terdaftar: {len(domains)}")
     
     await kirim_status()
     
