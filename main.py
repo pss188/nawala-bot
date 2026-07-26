@@ -6,13 +6,10 @@ import asyncio
 import logging
 import schedule
 import json
-import re
-import urllib3
+import random
 from telegram.ext import Application
 from datetime import datetime
-
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from urllib.parse import urlparse
 
 # Setup logging
 logging.basicConfig(
@@ -29,100 +26,255 @@ if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
     sys.exit(1)
 
-# ============================================
-# PROXY INDONESIA (dari daftar Anda)
-# ============================================
-PROXY_HOST = "43.218.124.29"
-PROXY_PORT = 28950
-PROXY_USERNAME = ""  # Kosong karena proxy ini tidak perlu auth
-PROXY_PASSWORD = ""
-
-# Proxy URLs
-if PROXY_USERNAME and PROXY_PASSWORD:
-    PROXY_HTTP = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
-else:
-    PROXY_HTTP = f"http://{PROXY_HOST}:{PROXY_PORT}"
-
-# Konfigurasi proxy
-proxies = {
-    'http': PROXY_HTTP,
-    'https': PROXY_HTTP,
-}
-
-logger.info(f"🔑 Menggunakan proxy: {PROXY_HOST}:{PROXY_PORT} (HTTP - Jakarta, Indonesia)")
-
-# ============================================
-# PROXY CADANGAN (jika proxy utama gagal)
-# ============================================
-BACKUP_PROXIES = [
-    {"host": "108.136.140.236", "port": 26090, "type": "http"},
-    {"host": "43.218.124.29", "port": 15224, "type": "socks4"},
-    {"host": "108.136.140.236", "port": 36116, "type": "http"},
+# ============= PROXY CONFIGURATION =============
+# Daftar proxy lengkap dengan format (host, port, protocol, type)
+PROXY_LIST = [
+    # Format: (host, port, protocol, type)
+    # HTTP Proxies
+    ("43.218.124.29", 8090, "http", "transparent"),
+    ("34.50.105.1", 80, "http", "transparent"),
+    ("114.4.168.140", 80, "http", "transparent"),
+    ("43.218.124.29", 28950, "http", "transparent"),
+    ("43.218.124.29", 30537, "http", "transparent"),
+    ("108.136.140.236", 14043, "http", "transparent"),
+    ("202.180.21.214", 80, "http", "transparent"),
+    
+    # SOCKS5 Proxies
+    ("43.218.124.29", 57170, "socks5", "transparent"),
+    ("43.218.124.29", 21246, "socks5", "transparent"),
+    ("108.136.140.236", 43347, "socks5", "transparent"),
+    ("108.136.140.236", 21401, "socks5", "transparent"),
+    ("43.218.124.29", 9254, "socks5", "transparent"),
+    ("108.136.140.236", 9551, "socks5", "anonymous"),
+    ("43.218.124.29", 44098, "socks5", "transparent"),
+    ("43.218.124.29", 19141, "socks5", "transparent"),
+    ("108.136.140.236", 26090, "socks5", "transparent"),
+    ("108.136.140.236", 36116, "socks5", "transparent"),
+    ("108.136.140.236", 12420, "socks5", "transparent"),
+    ("108.136.140.236", 26258, "socks5", "transparent"),
+    ("108.136.140.236", 9849, "socks5", "transparent"),
+    ("43.218.124.29", 17568, "socks5", "anonymous"),
+    ("108.136.140.236", 53115, "socks5", "transparent"),
+    ("108.136.140.236", 26667, "socks5", "transparent"),
+    ("43.218.124.29", 8083, "socks5", "transparent"),
+    ("43.218.124.29", 38887, "socks5", "transparent"),
+    ("108.136.140.236", 24139, "socks5", "transparent"),
+    ("108.136.140.236", 44042, "socks5", "transparent"),
+    ("43.218.124.29", 24281, "socks5", "transparent"),
+    ("108.136.140.236", 10780, "socks5", "transparent"),
+    ("108.136.140.236", 25140, "socks5", "transparent"),
+    ("43.218.124.29", 51908, "socks5", "transparent"),
+    
+    # SOCKS4 Proxies
+    ("43.218.124.29", 57170, "socks4", "transparent"),
+    ("43.218.124.29", 8090, "socks4", "transparent"),
+    ("108.136.140.236", 21401, "socks4", "transparent"),
+    ("108.136.140.236", 9551, "socks4", "anonymous"),
+    ("43.218.124.29", 44098, "socks4", "transparent"),
+    ("43.218.124.29", 19141, "socks4", "transparent"),
+    ("43.218.124.29", 15224, "socks4", "transparent"),
+    ("108.136.140.236", 36116, "socks4", "transparent"),
+    ("108.136.140.236", 12420, "socks4", "transparent"),
+    ("108.136.140.236", 26258, "socks4", "transparent"),
+    ("108.136.140.236", 9443, "socks4", "transparent"),
+    ("108.136.140.236", 9849, "socks4", "transparent"),
+    ("43.218.124.29", 17568, "socks4", "anonymous"),
+    ("108.136.140.236", 53115, "socks4", "transparent"),
+    ("108.136.140.236", 26667, "socks4", "transparent"),
+    ("43.218.124.29", 8083, "socks4", "transparent"),
+    ("43.218.124.29", 38887, "socks4", "transparent"),
+    ("43.218.124.29", 17010, "socks4", "transparent"),
+    ("108.136.140.236", 50687, "socks4", "transparent"),
+    ("108.136.140.236", 24139, "socks4", "transparent"),
+    ("108.136.140.236", 44042, "socks4", "transparent"),
+    ("43.218.124.29", 24281, "socks4", "transparent"),
+    ("108.136.140.236", 10780, "socks4", "transparent"),
+    ("108.136.140.236", 4153, "socks4", "anonymous"),
+    ("108.136.140.236", 25140, "socks4", "transparent"),
+    ("43.218.124.29", 51908, "socks4", "transparent"),
 ]
 
-# Bot setup
-try:
-    application = Application.builder().token(TOKEN).build()
-    logger.info("✅ Bot Telegram berhasil diinisialisasi")
-except Exception as e:
-    logger.error(f"❌ Gagal setup bot: {e}")
-    sys.exit(1)
-
-class TrustPositifChecker:
+class ProxyManager:
+    """Manajer proxy dengan rotasi dan failover"""
+    
     def __init__(self):
-        self.session = requests.Session()
-        self.base_url = "https://trustpositif.komdigi.go.id"
-        self.session.proxies.update(proxies)
-        # NONAKTIFKAN SSL VERIFICATION
-        self.session.verify = False
+        self.proxies = PROXY_LIST.copy()
+        self.current_index = 0
+        self.failed_proxies = {}
+        self.max_failures = 3
+        self.reset_time = 300  # 5 menit reset failed proxies
+        self.last_reset = time.time()
+        self.working_proxy = None
         
-        # Headers untuk meniru browser
-        self.headers = {
+    def get_next_proxy(self):
+        """Dapatkan proxy berikutnya dengan rotasi round-robin"""
+        self._reset_failed_if_needed()
+        
+        # Coba cari proxy yang berfungsi
+        attempts = 0
+        while attempts < len(self.proxies):
+            proxy = self.proxies[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.proxies)
+            
+            # Skip proxy yang gagal
+            if proxy in self.failed_proxies:
+                if time.time() - self.failed_proxies[proxy] < 60:  # Tunggu 60 detik sebelum retry
+                    attempts += 1
+                    continue
+                else:
+                    # Hapus dari failed jika sudah cukup waktu
+                    del self.failed_proxies[proxy]
+            
+            return proxy
+        
+        # Jika semua proxy gagal, reset failed list
+        self.failed_proxies.clear()
+        return self.proxies[0]
+    
+    def _reset_failed_if_needed(self):
+        """Reset daftar proxy gagal jika sudah waktunya"""
+        if time.time() - self.last_reset > self.reset_time:
+            self.failed_proxies.clear()
+            self.last_reset = time.time()
+            logger.info("🔄 Reset daftar proxy gagal")
+    
+    def mark_failed(self, proxy):
+        """Tandai proxy sebagai gagal"""
+        self.failed_proxies[proxy] = time.time()
+        logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} ({proxy[2]}) ditandai gagal")
+        
+        # Hapus dari daftar yang berfungsi
+        if self.working_proxy == proxy:
+            self.working_proxy = None
+    
+    def mark_success(self, proxy):
+        """Tandai proxy sebagai berhasil"""
+        if proxy in self.failed_proxies:
+            del self.failed_proxies[proxy]
+        self.working_proxy = proxy
+
+class ProxySession:
+    """Session dengan dukungan proxy"""
+    
+    def __init__(self):
+        self.proxy_manager = ProxyManager()
+        self.session = requests.Session()
+        self.current_proxy = None
+        self._setup_session()
+    
+    def _setup_session(self):
+        """Setup session dengan headers default"""
+        self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-        }
-        
-        # CSRF token - akan diambil dari halaman
-        self.csrf_token = self._get_csrf_token()
-        
-        # API endpoints
-        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
+        })
     
-    def _get_csrf_token(self):
-        """Ambil CSRF token dari halaman"""
-        try:
-            response = self.session.get(
-                self.base_url,
-                headers=self.headers,
-                timeout=15,
-                verify=False  # Nonaktifkan SSL
-            )
+    def _get_proxy_url(self, proxy):
+        """Buat URL proxy dari tuple proxy"""
+        host, port, protocol, _ = proxy
+        
+        # Untuk HTTP proxy
+        if protocol == "http":
+            return f"http://{host}:{port}"
+        # Untuk SOCKS proxy
+        elif protocol.startswith("socks"):
+            return f"{protocol}://{host}:{port}"
+        else:
+            return f"http://{host}:{port}"
+    
+    def _get_proxies_dict(self, proxy):
+        """Buat dictionary proxies untuk requests"""
+        proxy_url = self._get_proxy_url(proxy)
+        return {
+            'http': proxy_url,
+            'https': proxy_url,
+        }
+    
+    def get(self, url, **kwargs):
+        """GET request dengan proxy"""
+        return self._request('GET', url, **kwargs)
+    
+    def post(self, url, **kwargs):
+        """POST request dengan proxy"""
+        return self._request('POST', url, **kwargs)
+    
+    def _request(self, method, url, max_retries=3, **kwargs):
+        """Execute request dengan retry dan proxy rotation"""
+        last_error = None
+        
+        for attempt in range(max_retries):
+            # Dapatkan proxy
+            proxy = self.proxy_manager.get_next_proxy()
+            proxy_url = self._get_proxy_url(proxy)
+            proxies = self._get_proxies_dict(proxy)
             
-            if response.status_code == 200:
-                # Cari CSRF token di HTML
-                match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
-                if match:
-                    token = match.group(1)
-                    logger.info(f"✅ CSRF token ditemukan: {token[:10]}...")
-                    return token
+            try:
+                # Set timeout default jika tidak ada
+                if 'timeout' not in kwargs:
+                    kwargs['timeout'] = 15
                 
-                # Coba pattern lain
-                match = re.search(r'csrf_token"\s*value="([^"]+)"', response.text)
-                if match:
-                    token = match.group(1)
-                    logger.info(f"✅ CSRF token ditemukan: {token[:10]}...")
-                    return token
+                # Tambahkan proxies ke kwargs
+                kwargs['proxies'] = proxies
+                
+                logger.debug(f"🔗 Menggunakan proxy: {proxy[0]}:{proxy[1]} ({proxy[2]}) - Attempt {attempt + 1}")
+                
+                # Execute request
+                if method.upper() == 'GET':
+                    response = self.session.get(url, **kwargs)
+                else:
+                    response = self.session.post(url, **kwargs)
+                
+                # Jika sukses, tandai proxy berfungsi
+                if response.status_code < 400:
+                    self.proxy_manager.mark_success(proxy)
+                    self.current_proxy = proxy
+                    return response
+                else:
+                    # Status code error
+                    logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}")
+                    self.proxy_manager.mark_failed(proxy)
+                    
+            except requests.exceptions.ProxyError as e:
+                logger.warning(f"❌ Proxy error dengan {proxy[0]}:{proxy[1]} - {str(e)[:100]}")
+                self.proxy_manager.mark_failed(proxy)
+                last_error = e
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏱️ Timeout dengan proxy {proxy[0]}:{proxy[1]}")
+                self.proxy_manager.mark_failed(proxy)
+                last_error = "Timeout"
+                
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"🔌 Connection error dengan {proxy[0]}:{proxy[1]} - {str(e)[:100]}")
+                self.proxy_manager.mark_failed(proxy)
+                last_error = e
+                
+            except Exception as e:
+                logger.warning(f"❌ Error dengan proxy {proxy[0]}:{proxy[1]} - {str(e)[:100]}")
+                self.proxy_manager.mark_failed(proxy)
+                last_error = e
             
-            logger.warning("⚠️ Gagal mendapatkan CSRF token, menggunakan default")
-            return "3835f8d38d9c0a271d2d782a70113bc2"
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Error mendapatkan CSRF token: {e}")
-            return "3835f8d38d9c0a271d2d782a70113bc2"
+            # Delay before retry
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+        
+        # Semua percobaan gagal
+        raise Exception(f"Semua proxy gagal setelah {max_retries} percobaan. Error terakhir: {last_error}")
+
+class TrustPositifChecker:
+    def __init__(self):
+        self.proxy_session = ProxySession()
+        self.base_url = "https://trustpositif.komdigi.go.id"
+        
+        # CSRF token dari HTML (tetap)
+        self.csrf_token = "3835f8d38d9c0a271d2d782a70113bc2"
+        
+        # API endpoints dari JavaScript
+        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
     
     def check_batch_5_domains(self, domains):
         """Cek 5 domain sekaligus sesuai limit website"""
@@ -136,9 +288,6 @@ class TrustPositifChecker:
             
             logger.info(f"🔍 Mengecek batch: {', '.join(domains)}")
             
-            # Refresh CSRF token
-            self.csrf_token = self._get_csrf_token()
-            
             # Data payload sesuai form
             data = {
                 'csrf_token': self.csrf_token,
@@ -146,97 +295,32 @@ class TrustPositifChecker:
             }
             
             # Headers untuk AJAX request
-            api_headers = self.headers.copy()
-            api_headers.update({
+            headers = {
                 'X-Requested-With': 'XMLHttpRequest',
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                 'Referer': f'{self.base_url}/',
-                'Origin': self.base_url
-            })
+                'Origin': self.base_url,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            }
             
-            # Kirim request dengan retry
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    response = self.session.post(
-                        self.api_url,
-                        data=data,
-                        headers=api_headers,
-                        timeout=30,
-                        verify=False  # Nonaktifkan SSL
-                    )
-                    
-                    logger.info(f"📡 Response status: {response.status_code}")
-                    
-                    if response.status_code == 200:
-                        return self.parse_api_response(response.text, domains)
-                    else:
-                        logger.warning(f"⚠️ Attempt {attempt+1}: HTTP {response.status_code}")
-                        if attempt < max_retries - 1:
-                            time.sleep(3)
-                            continue
-                        
-                except requests.exceptions.ProxyError as e:
-                    logger.error(f"❌ Proxy error attempt {attempt+1}: {e}")
-                    if attempt < max_retries - 1:
-                        # Coba ganti proxy
-                        if self._switch_proxy():
-                            time.sleep(3)
-                            continue
-                except requests.exceptions.SSLError as e:
-                    logger.error(f"❌ SSL Error attempt {attempt+1}: {e}")
-                    # SSL Error biasanya karena verify=False tidak di-respect
-                    # Coba gunakan session baru dengan SSL disabled
-                    if attempt < max_retries - 1:
-                        self.session.verify = False
-                        time.sleep(2)
-                        continue
-                except requests.exceptions.Timeout:
-                    logger.warning(f"⚠️ Timeout attempt {attempt+1}")
-                    if attempt < max_retries - 1:
-                        time.sleep(3)
-                        continue
-                except Exception as e:
-                    logger.error(f"❌ Attempt {attempt+1}: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(3)
-                        continue
+            # Kirim request dengan proxy
+            response = self.proxy_session.post(
+                self.api_url,
+                data=data,
+                headers=headers
+            )
             
-            logger.error(f"❌ Gagal setelah {max_retries} percobaan")
-            return []
+            logger.info(f"📡 Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                return self.parse_api_response(response.text, domains)
+            else:
+                logger.error(f"❌ HTTP Error {response.status_code}")
+                return []
                 
         except Exception as e:
             logger.error(f"❌ Error checking batch: {e}")
             return []
-    
-    def _switch_proxy(self):
-        """Ganti proxy jika proxy utama gagal"""
-        global proxies
-        for backup in BACKUP_PROXIES:
-            try:
-                if backup["type"] == "http":
-                    proxy_url = f"http://{backup['host']}:{backup['port']}"
-                    new_proxies = {'http': proxy_url, 'https': proxy_url}
-                    self.session.proxies.update(new_proxies)
-                    logger.info(f"🔄 Mengganti proxy ke: {backup['host']}:{backup['port']}")
-                    # Test koneksi
-                    test_response = self.session.get(
-                        self.base_url,
-                        headers=self.headers,
-                        timeout=10,
-                        verify=False
-                    )
-                    if test_response.status_code == 200:
-                        logger.info(f"✅ Proxy {backup['host']}:{backup['port']} berhasil")
-                        return True
-                elif backup["type"] == "socks4":
-                    # Untuk SOCKS4, perlu library tambahan
-                    logger.info(f"⚠️ SOCKS4 proxy {backup['host']}:{backup['port']} tidak didukung")
-                    continue
-            except:
-                continue
-        logger.warning("⚠️ Semua proxy backup gagal")
-        return False
     
     def parse_api_response(self, response_text, original_domains):
         """Parse API response"""
@@ -313,6 +397,7 @@ class TrustPositifChecker:
                         if f'<td>{domain_lower}</td>' in html_lower:
                             # Cari status setelah domain
                             pattern = f'<td>{domain_lower}</td>.*?<td>(.*?)</td>'
+                            import re
                             match = re.search(pattern, html_lower, re.DOTALL)
                             if match:
                                 status = match.group(1).strip()
@@ -359,7 +444,7 @@ class TrustPositifChecker:
                 
                 # Delay antar batch untuk hindari rate limiting
                 if i + batch_size < total_domains:
-                    delay = 3
+                    delay = 3  # 3 detik
                     logger.info(f"⏳ Menunggu {delay} detik sebelum batch berikutnya...")
                     time.sleep(delay)
             
@@ -383,7 +468,11 @@ def baca_domain():
                 f.write("google.com\n")
                 f.write("facebook.com\n")
                 f.write("twitter.com\n")
-                f.write("jendelawd.space\n")
+                f.write("hkbpokerqqid2.pages.dev\n")
+                f.write("hkbwdcom.pages.dev\n")
+                f.write("jendelatoto.id\n")
+                f.write("jendelatotocomamp.pages.dev\n")
+                f.write("rtpjendelatt.pages.dev\n")
             logger.info("✅ File domain.txt dibuat dengan contoh")
             return []
         
@@ -425,7 +514,7 @@ async def kirim_status():
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Batch:** 5 domain/request\n"
-            f"🔑 **Proxy:** {PROXY_HOST}:{PROXY_PORT} (Jakarta, Indonesia)\n\n"
+            f"🌐 **Proxy:** Rotasi {len(PROXY_LIST)} proxy\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
         
@@ -537,7 +626,6 @@ async def cek_domain_job():
     try:
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF KOMINFO")
-        logger.info(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (Jakarta, Indonesia)")
         logger.info("=" * 60)
         
         # Baca domain
@@ -588,15 +676,17 @@ async def schedule_runner():
             await asyncio.sleep(5)
 
 async def test_koneksi():
-    """Test koneksi ke trustpositif.komdigi.go.id"""
+    """Test koneksi ke trustpositif.komdigi.go.id menggunakan proxy"""
     try:
-        logger.info("🔗 Testing koneksi ke trustpositif.komdigi.go.id...")
+        logger.info("🔗 Testing koneksi ke trustpositif.komdigi.go.id dengan proxy...")
         
-        response = requests.get(
+        # Buat session dengan proxy
+        proxy_session = ProxySession()
+        
+        # Coba akses dengan proxy
+        response = proxy_session.get(
             "https://trustpositif.komdigi.go.id/",
-            timeout=15,
-            proxies=proxies,
-            verify=False  # Nonaktifkan SSL
+            timeout=10
         )
         
         if response.status_code == 200:
@@ -619,14 +709,14 @@ async def main():
     """Main function"""
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF KOMINFO DOMAIN MONITORING BOT")
-    print(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (Jakarta, Indonesia)")
+    print("=" * 60)
+    print(f"🌐 Proxy Pool: {len(PROXY_LIST)} proxies")
     print("=" * 60)
     
     logger.info("Bot starting...")
-    logger.info(f"🔑 Proxy: {PROXY_HOST}:{PROXY_PORT} (Jakarta, Indonesia)")
     
     # Test koneksi
-    logger.info("Testing connection...")
+    logger.info("Testing connection with proxy rotation...")
     if not await test_koneksi():
         logger.warning("⚠️ Koneksi bermasalah, bot tetap berjalan...")
     else:
@@ -652,9 +742,11 @@ async def main():
     await cek_domain_job()
     
     logger.info("✅ Bot successfully started!")
+    logger.info(f"📍 Proxy pool: {len(PROXY_LIST)} proxies (HTTP, SOCKS4, SOCKS5)")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
     logger.info("📍 Batch size: 5 domains per request")
+    logger.info("📍 Auto-rotate proxy on failure")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     # Jalankan schedule runner
@@ -667,6 +759,14 @@ if __name__ == "__main__":
         import requests
         from telegram import __version__
         logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}")
+        
+        # Cek requests[socks] untuk support SOCKS
+        try:
+            import requests.socks
+            logger.info("✅ SOCKS support available")
+        except ImportError:
+            logger.warning("⚠️ SOCKS support not available. Install with: pip install requests[socks]")
+            
     except ImportError as e:
         logger.error(f"❌ Missing dependency: {e}")
         logger.info("💡 Install dengan: pip install -r requirements.txt")
