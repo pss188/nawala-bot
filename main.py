@@ -7,8 +7,12 @@ import logging
 import schedule
 import json
 import re
+import urllib3
 from telegram.ext import Application
 from datetime import datetime
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Setup logging
 logging.basicConfig(
@@ -26,11 +30,8 @@ if not TOKEN or not CHAT_ID:
     sys.exit(1)
 
 # ============================================
-# PROXY INDONESIA BARU (dari daftar Anda)
+# PROXY INDONESIA (dari daftar Anda)
 # ============================================
-# Menggunakan proxy dengan response tercepat: 43.218.124.29:28950 (HTTP)
-# Response time: 366 ms - Lokasi: Jakarta, Indonesia
-
 PROXY_HOST = "43.218.124.29"
 PROXY_PORT = 28950
 PROXY_USERNAME = ""  # Kosong karena proxy ini tidak perlu auth
@@ -72,6 +73,8 @@ class TrustPositifChecker:
         self.session = requests.Session()
         self.base_url = "https://trustpositif.komdigi.go.id"
         self.session.proxies.update(proxies)
+        # NONAKTIFKAN SSL VERIFICATION
+        self.session.verify = False
         
         # Headers untuk meniru browser
         self.headers = {
@@ -95,7 +98,8 @@ class TrustPositifChecker:
             response = self.session.get(
                 self.base_url,
                 headers=self.headers,
-                timeout=15
+                timeout=15,
+                verify=False  # Nonaktifkan SSL
             )
             
             if response.status_code == 200:
@@ -158,7 +162,8 @@ class TrustPositifChecker:
                         self.api_url,
                         data=data,
                         headers=api_headers,
-                        timeout=30  # Timeout lebih panjang
+                        timeout=30,
+                        verify=False  # Nonaktifkan SSL
                     )
                     
                     logger.info(f"📡 Response status: {response.status_code}")
@@ -175,8 +180,16 @@ class TrustPositifChecker:
                     logger.error(f"❌ Proxy error attempt {attempt+1}: {e}")
                     if attempt < max_retries - 1:
                         # Coba ganti proxy
-                        self._switch_proxy()
-                        time.sleep(3)
+                        if self._switch_proxy():
+                            time.sleep(3)
+                            continue
+                except requests.exceptions.SSLError as e:
+                    logger.error(f"❌ SSL Error attempt {attempt+1}: {e}")
+                    # SSL Error biasanya karena verify=False tidak di-respect
+                    # Coba gunakan session baru dengan SSL disabled
+                    if attempt < max_retries - 1:
+                        self.session.verify = False
+                        time.sleep(2)
                         continue
                 except requests.exceptions.Timeout:
                     logger.warning(f"⚠️ Timeout attempt {attempt+1}")
@@ -210,7 +223,8 @@ class TrustPositifChecker:
                     test_response = self.session.get(
                         self.base_url,
                         headers=self.headers,
-                        timeout=10
+                        timeout=10,
+                        verify=False
                     )
                     if test_response.status_code == 200:
                         logger.info(f"✅ Proxy {backup['host']}:{backup['port']} berhasil")
@@ -581,7 +595,8 @@ async def test_koneksi():
         response = requests.get(
             "https://trustpositif.komdigi.go.id/",
             timeout=15,
-            proxies=proxies
+            proxies=proxies,
+            verify=False  # Nonaktifkan SSL
         )
         
         if response.status_code == 200:
