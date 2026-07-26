@@ -30,51 +30,128 @@ if not TOKEN or not CHAT_ID:
     sys.exit(1)
 
 # ============= PROXY CONFIGURATION =============
-# Default proxy list (akan ditimpa oleh fetch_proxies_from_web jika berhasil)
-DEFAULT_PROXY_LIST = [
+# Hanya digunakan untuk bootstrap (ambil proxy pertama kali)
+BOOTSTRAP_PROXIES = [
     ("43.218.124.29", 8090, "http", "transparent"),
     ("34.50.105.1", 80, "http", "transparent"),
     ("114.4.168.140", 80, "http", "transparent"),
+    ("43.218.124.29", 28950, "http", "transparent"),
+    ("108.136.140.236", 14043, "http", "transparent"),
 ]
 
-# Global proxy list yang akan diisi dari web
+# Global proxy list - akan diisi dari web
 PROXY_LIST = []
+PROXY_SOURCES = [
+    "https://proxy5.net/free-proxy/indonesia",
+    "https://free-proxy-list.net/",
+    "https://www.sslproxies.org/",
+    "https://www.us-proxy.org/",
+]
 
-def fetch_proxies_from_web():
-    """Ambil daftar proxy dari proxy5.net"""
+def fetch_proxies_from_web(proxy_to_use=None):
+    """Ambil daftar proxy dari berbagai sumber"""
     global PROXY_LIST
     
+    all_new_proxies = []
+    
+    for source_url in PROXY_SOURCES:
+        try:
+            logger.info(f"🌐 Mencoba mengambil proxy dari {source_url}...")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0',
+            }
+            
+            proxies = {}
+            if proxy_to_use:
+                proxy_url = f"{proxy_to_use[2]}://{proxy_to_use[0]}:{proxy_to_use[1]}"
+                proxies = {'http': proxy_url, 'https': proxy_url}
+                logger.info(f"🔗 Menggunakan proxy {proxy_to_use[0]}:{proxy_to_use[1]}")
+            
+            response = requests.get(
+                source_url,
+                headers=headers,
+                proxies=proxies if proxy_to_use else None,
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"⚠️ Gagal mengambil dari {source_url}: HTTP {response.status_code}")
+                continue
+            
+            # Parse berdasarkan sumber
+            if 'proxy5.net' in source_url:
+                proxies = parse_proxy5_html(response.text)
+            elif 'free-proxy-list.net' in source_url:
+                proxies = parse_free_proxy_list(response.text)
+            else:
+                proxies = parse_generic_proxy_table(response.text)
+            
+            if proxies:
+                all_new_proxies.extend(proxies)
+                logger.info(f"✅ Mendapat {len(proxies)} proxy dari {source_url}")
+                break  # Berhenti jika berhasil dapat proxy
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error dari {source_url}: {e}")
+            continue
+    
+    if all_new_proxies:
+        # Hapus duplikat
+        unique_proxies = list(set(all_new_proxies))
+        PROXY_LIST = unique_proxies
+        logger.info(f"✅ Total {len(PROXY_LIST)} proxy berhasil diambil")
+        
+        # Simpan ke cache
+        try:
+            with open('proxy_cache.json', 'w') as f:
+                json.dump(PROXY_LIST, f)
+            logger.info("💾 Proxy disimpan ke cache")
+        except:
+            pass
+        
+        return True
+    
+    # Jika semua sumber gagal, coba ambil dari cache
+    if load_proxy_cache():
+        return True
+    
+    return False
+
+def parse_proxy5_html(html):
+    """Parse HTML dari proxy5.net"""
+    proxies = []
     try:
-        logger.info("🌐 Mengambil daftar proxy dari proxy5.net...")
+        soup = BeautifulSoup(html, 'html.parser')
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-        }
+        # Cari tabel
+        table = None
+        for selector in ['table', 'table.table', 'table.proxy-table']:
+            try:
+                table = soup.select_one(selector)
+                if table:
+                    break
+            except:
+                continue
         
-        response = requests.get(
-            "https://proxy5.net/free-proxy/indonesia",
-            headers=headers,
-            timeout=15
-        )
-        
-        if response.status_code != 200:
-            logger.warning(f"⚠️ Gagal mengambil proxy: HTTP {response.status_code}")
-            return False
-        
-        # Parse HTML dengan BeautifulSoup
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Cari tabel proxy
-        table = soup.find('table')
         if not table:
-            logger.warning("⚠️ Tabel proxy tidak ditemukan di halaman")
-            return False
+            tables = soup.find_all('table')
+            for t in tables:
+                if 'IP Address' in str(t) or 'Port' in str(t):
+                    table = t
+                    break
         
-        # Parse baris tabel
+        if not table:
+            return proxies
+        
         rows = table.find_all('tr')
-        new_proxies = []
         protocol_map = {
             'HTTP': 'http',
             'HTTPS': 'http',
@@ -82,17 +159,14 @@ def fetch_proxies_from_web():
             'SOCKS5': 'socks5'
         }
         
-        for row in rows[1:]:  # Skip header
+        for row in rows[1:]:
             cols = row.find_all('td')
             if len(cols) >= 5:
                 try:
-                    # Ekstrak data
                     ip_text = cols[0].get_text(strip=True)
                     port_text = cols[1].get_text(strip=True)
                     protocol_text = cols[2].get_text(strip=True).upper()
-                    anonymity_text = cols[3].get_text(strip=True).lower()
                     
-                    # Validasi IP dan port
                     if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_text):
                         continue
                     
@@ -100,56 +174,113 @@ def fetch_proxies_from_web():
                     if port < 1 or port > 65535:
                         continue
                     
-                    # Parse protocols
                     protocols = []
                     for proto in ['HTTP', 'HTTPS', 'SOCKS4', 'SOCKS5']:
                         if proto in protocol_text:
                             protocols.append(protocol_map.get(proto, proto.lower()))
                     
                     if not protocols:
-                        protocols = ['http']  # Default ke http
+                        protocols = ['http']
                     
-                    # Tambahkan ke daftar
                     for proto in protocols:
-                        # Filter proxy yang terlalu lambat (latency > 1000ms) bisa diabaikan
-                        # Tapi kita tetap ambil semua
-                        new_proxies.append((ip_text, port, proto, anonymity_text))
-                        
-                except (ValueError, IndexError) as e:
+                        proxy_tuple = (ip_text, port, proto, 'transparent')
+                        if proxy_tuple not in proxies:
+                            proxies.append(proxy_tuple)
+                            
+                except (ValueError, IndexError):
                     continue
-        
-        if new_proxies:
-            # Hapus duplikat
-            unique_proxies = list(set(new_proxies))
-            PROXY_LIST = unique_proxies
-            logger.info(f"✅ Berhasil mengambil {len(PROXY_LIST)} proxy dari proxy5.net")
-            
-            # Simpan ke file untuk cache
-            try:
-                with open('proxy_cache.json', 'w') as f:
-                    json.dump(PROXY_LIST, f)
-                logger.info("💾 Proxy disimpan ke cache")
-            except:
-                pass
-            
-            return True
-        else:
-            logger.warning("⚠️ Tidak ada proxy yang valid ditemukan")
-            return False
-            
+                    
     except Exception as e:
-        logger.error(f"❌ Error mengambil proxy dari web: {e}")
-        return False
+        logger.error(f"Error parsing proxy5: {e}")
+    
+    return proxies
+
+def parse_free_proxy_list(html):
+    """Parse HTML dari free-proxy-list.net"""
+    proxies = []
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        table = soup.find('table', {'id': 'proxylisttable'})
+        
+        if not table:
+            return proxies
+        
+        rows = table.find_all('tr')
+        for row in rows[1:]:
+            cols = row.find_all('td')
+            if len(cols) >= 8:
+                try:
+                    ip_text = cols[0].get_text(strip=True)
+                    port_text = cols[1].get_text(strip=True)
+                    protocol_text = cols[6].get_text(strip=True).upper()
+                    
+                    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_text):
+                        continue
+                    
+                    port = int(port_text)
+                    if port < 1 or port > 65535:
+                        continue
+                    
+                    protocol = 'http' if protocol_text == 'HTTP' else 'socks5'
+                    proxy_tuple = (ip_text, port, protocol, 'transparent')
+                    if proxy_tuple not in proxies:
+                        proxies.append(proxy_tuple)
+                        
+                except (ValueError, IndexError):
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Error parsing free-proxy-list: {e}")
+    
+    return proxies
+
+def parse_generic_proxy_table(html):
+    """Parse HTML dari tabel proxy generic"""
+    proxies = []
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        table = soup.find('table')
+        
+        if not table:
+            return proxies
+        
+        rows = table.find_all('tr')
+        for row in rows[1:]:
+            cols = row.find_all('td')
+            if len(cols) >= 4:
+                try:
+                    ip_text = cols[0].get_text(strip=True)
+                    port_text = cols[1].get_text(strip=True)
+                    
+                    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_text):
+                        continue
+                    
+                    port = int(port_text)
+                    if port < 1 or port > 65535:
+                        continue
+                    
+                    protocol = 'http'  # Default
+                    proxy_tuple = (ip_text, port, protocol, 'transparent')
+                    if proxy_tuple not in proxies:
+                        proxies.append(proxy_tuple)
+                        
+                except (ValueError, IndexError):
+                    continue
+                    
+    except Exception as e:
+        logger.error(f"Error parsing generic table: {e}")
+    
+    return proxies
 
 def load_proxy_cache():
-    """Muat proxy dari cache jika gagal mengambil dari web"""
+    """Muat proxy dari cache"""
     global PROXY_LIST
     
     try:
         if os.path.exists('proxy_cache.json'):
             with open('proxy_cache.json', 'r') as f:
                 cached_proxies = json.load(f)
-                if cached_proxies:
+                if cached_proxies and len(cached_proxies) > 0:
                     PROXY_LIST = cached_proxies
                     logger.info(f"📂 Memuat {len(PROXY_LIST)} proxy dari cache")
                     return True
@@ -158,63 +289,157 @@ def load_proxy_cache():
     
     return False
 
-def init_proxies():
-    """Inisialisasi daftar proxy"""
+def find_working_proxy():
+    """Cari proxy yang bekerja dengan mencoba semua proxy yang ada"""
     global PROXY_LIST
     
-    # Coba ambil dari web
-    if fetch_proxies_from_web():
-        return True
+    if not PROXY_LIST:
+        logger.error("❌ Tidak ada proxy untuk diuji!")
+        return None
     
-    # Jika gagal, coba dari cache
-    if load_proxy_cache():
-        return True
+    logger.info(f"🔍 Menguji {len(PROXY_LIST)} proxy untuk mencari yang bekerja...")
     
-    # Jika semua gagal, pakai default
-    PROXY_LIST = DEFAULT_PROXY_LIST.copy()
-    logger.warning(f"⚠️ Menggunakan {len(PROXY_LIST)} proxy default")
+    # Acak urutan proxy
+    test_proxies = PROXY_LIST.copy()
+    random.shuffle(test_proxies)
+    
+    working_proxies = []
+    
+    for proxy in test_proxies[:50]:  # Batasi 50 proxy untuk testing
+        try:
+            host, port, protocol, _ = proxy
+            proxy_url = f"{protocol}://{host}:{port}"
+            proxies = {'http': proxy_url, 'https': proxy_url}
+            
+            logger.info(f"🧪 Menguji {host}:{port} ({protocol})...")
+            
+            # Test dengan trustpositif
+            response = requests.get(
+                "https://trustpositif.komdigi.go.id/",
+                proxies=proxies,
+                timeout=10,
+                verify=False,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+            
+            if response.status_code == 200 and 'TrustPositif' in response.text:
+                logger.info(f"✅ Proxy {host}:{port} BEKERJA!")
+                working_proxies.append(proxy)
+                break  # Cukup satu yang bekerja
+                
+        except Exception as e:
+            logger.debug(f"❌ Proxy {proxy[0]}:{proxy[1]} gagal: {str(e)[:50]}")
+            continue
+    
+    if working_proxies:
+        # Update PROXY_LIST dengan yang bekerja
+        PROXY_LIST = working_proxies
+        return working_proxies[0]
+    
+    logger.warning("⚠️ Tidak ada proxy yang bekerja dari daftar saat ini")
+    return None
+
+def fetch_and_test_proxies():
+    """Ambil proxy dari web dan uji sampai dapat yang bekerja"""
+    global PROXY_LIST
+    
+    max_attempts = 5
+    attempt = 0
+    
+    while attempt < max_attempts:
+        attempt += 1
+        logger.info(f"🔄 Percobaan {attempt}/{max_attempts} mendapatkan proxy...")
+        
+        # Coba dengan proxy yang sudah ada (jika ada)
+        proxy_to_use = None
+        if PROXY_LIST:
+            # Gunakan proxy acak dari yang sudah ada
+            proxy_to_use = random.choice(PROXY_LIST)
+            logger.info(f"🔑 Menggunakan proxy existing: {proxy_to_use[0]}:{proxy_to_use[1]}")
+        
+        # Ambil proxy dari web
+        if fetch_proxies_from_web(proxy_to_use):
+            logger.info(f"✅ Mendapat {len(PROXY_LIST)} proxy, mencari yang bekerja...")
+            
+            # Cari proxy yang bekerja
+            working_proxy = find_working_proxy()
+            if working_proxy:
+                logger.info(f"🎯 Proxy bekerja ditemukan: {working_proxy[0]}:{working_proxy[1]}")
+                return True
+        
+        # Jika gagal, tunggu sebentar sebelum mencoba lagi
+        if attempt < max_attempts:
+            wait_time = 5 * attempt
+            logger.info(f"⏳ Menunggu {wait_time} detik sebelum percobaan berikutnya...")
+            time.sleep(wait_time)
+    
+    logger.error("❌ Gagal mendapatkan proxy yang bekerja setelah beberapa percobaan")
     return False
 
 class ProxyManager:
     """Manajer proxy dengan rotasi dan failover"""
     
     def __init__(self):
-        self.proxies = PROXY_LIST.copy()
+        self.proxies = []
         self.current_index = 0
         self.failed_proxies = {}
-        self.max_failures = 2
-        self.reset_time = 120
-        self.last_reset = time.time()
-        self.working_proxy = None
-        self.proxy_stats = {}
+        self.last_refresh = 0
+        self.refresh_interval = 3600  # 1 jam
         
-    def refresh_proxies(self):
-        """Refresh daftar proxy dari web"""
-        logger.info("🔄 Refresh daftar proxy...")
-        if fetch_proxies_from_web():
-            self.proxies = PROXY_LIST.copy()
-            self.failed_proxies.clear()
-            logger.info(f"✅ Proxy di-refresh: {len(self.proxies)} proxy")
-            return True
-        return False
-        
-    def get_next_proxy(self):
-        """Dapatkan proxy berikutnya dengan rotasi round-robin"""
-        self._reset_failed_if_needed()
-        
-        # Jika daftar proxy kosong, refresh
+        # Inisialisasi - cari proxy sampai dapat
+        self._ensure_proxies()
+    
+    def _ensure_proxies(self):
+        """Pastikan ada proxy yang tersedia"""
         if not self.proxies:
-            self.refresh_proxies()
-            if not self.proxies:
-                self.proxies = DEFAULT_PROXY_LIST.copy()
+            logger.info("🔍 Mencari proxy yang bekerja...")
+            if fetch_and_test_proxies():
+                self.proxies = PROXY_LIST.copy()
+                logger.info(f"✅ {len(self.proxies)} proxy siap digunakan")
+            else:
+                logger.error("❌ Tidak ada proxy yang tersedia!")
+                # Terus mencoba setiap 30 detik
+                while not self.proxies:
+                    logger.info("🔄 Mencoba lagi dalam 30 detik...")
+                    time.sleep(30)
+                    if fetch_and_test_proxies():
+                        self.proxies = PROXY_LIST.copy()
+    
+    def refresh_proxies_if_needed(self):
+        """Refresh proxy jika sudah waktunya"""
+        current_time = time.time()
+        if current_time - self.last_refresh > self.refresh_interval:
+            logger.info("🔄 Refresh proxy (jadwal)...")
+            if fetch_and_test_proxies():
+                self.proxies = PROXY_LIST.copy()
+                self.failed_proxies.clear()
+                logger.info(f"✅ Proxy di-refresh: {len(self.proxies)} proxy")
+                self.last_refresh = current_time
+            else:
+                # Jika gagal refresh, tetap pakai yang lama
+                logger.warning("⚠️ Refresh proxy gagal, tetap menggunakan yang ada")
+    
+    def get_next_proxy(self):
+        """Dapatkan proxy berikutnya"""
+        # Refresh jika perlu
+        self.refresh_proxies_if_needed()
         
+        # Pastikan ada proxy
+        self._ensure_proxies()
+        
+        if not self.proxies:
+            return None
+        
+        # Cari proxy yang tidak gagal
         attempts = 0
         while attempts < len(self.proxies):
             proxy = self.proxies[self.current_index]
             self.current_index = (self.current_index + 1) % len(self.proxies)
             
             if proxy in self.failed_proxies:
-                if time.time() - self.failed_proxies[proxy] < 30:
+                if time.time() - self.failed_proxies[proxy] < 60:
                     attempts += 1
                     continue
                 else:
@@ -222,34 +447,24 @@ class ProxyManager:
             
             return proxy
         
+        # Jika semua proxy gagal, reset dan refresh
         self.failed_proxies.clear()
-        return self.proxies[0] if self.proxies else DEFAULT_PROXY_LIST[0]
+        self.proxies = PROXY_LIST.copy()
+        return self.proxies[0] if self.proxies else None
     
-    def _reset_failed_if_needed(self):
-        if time.time() - self.last_reset > self.reset_time:
-            self.failed_proxies.clear()
-            self.last_reset = time.time()
-            logger.info("🔄 Reset daftar proxy gagal")
-    
-    def mark_failed(self, proxy, error=None):
-        self.failed_proxies[proxy] = time.time()
-        error_type = str(error)[:50] if error else "unknown"
-        logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} ({proxy[2]}) gagal: {error_type}")
-        
-        if self.working_proxy == proxy:
-            self.working_proxy = None
+    def mark_failed(self, proxy):
+        """Tandai proxy sebagai gagal"""
+        if proxy:
+            self.failed_proxies[proxy] = time.time()
+            logger.info(f"⚠️ Proxy {proxy[0]}:{proxy[1]} ditandai gagal")
     
     def mark_success(self, proxy):
-        if proxy in self.failed_proxies:
+        """Tandai proxy sebagai berhasil"""
+        if proxy and proxy in self.failed_proxies:
             del self.failed_proxies[proxy]
-        self.working_proxy = proxy
-        
-        if proxy not in self.proxy_stats:
-            self.proxy_stats[proxy] = {'success': 0, 'fail': 0}
-        self.proxy_stats[proxy]['success'] += 1
 
 class ProxySession:
-    """Session dengan dukungan proxy dan SSL handling"""
+    """Session dengan dukungan proxy"""
     
     def __init__(self):
         self.proxy_manager = ProxyManager()
@@ -262,29 +477,23 @@ class ProxySession:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
         })
-        
         self.session.verify = False
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     def _get_proxy_url(self, proxy):
+        if not proxy:
+            return None
         host, port, protocol, _ = proxy
-        if protocol == "http":
-            return f"http://{host}:{port}"
-        elif protocol.startswith("socks"):
-            return f"{protocol}://{host}:{port}"
-        else:
-            return f"http://{host}:{port}"
+        return f"{protocol}://{host}:{port}"
     
     def _get_proxies_dict(self, proxy):
         proxy_url = self._get_proxy_url(proxy)
-        return {'http': proxy_url, 'https': proxy_url}
+        if proxy_url:
+            return {'http': proxy_url, 'https': proxy_url}
+        return {}
     
     def get(self, url, **kwargs):
         return self._request('GET', url, **kwargs)
@@ -292,11 +501,11 @@ class ProxySession:
     def post(self, url, **kwargs):
         return self._request('POST', url, **kwargs)
     
-    def _request(self, method, url, max_retries=2, **kwargs):
+    def _request(self, method, url, max_retries=3, **kwargs):
         last_error = None
         
         if 'timeout' not in kwargs:
-            kwargs['timeout'] = (10, 30)
+            kwargs['timeout'] = (15, 30)
         kwargs['verify'] = False
         
         import urllib3
@@ -304,12 +513,17 @@ class ProxySession:
         
         for attempt in range(max_retries):
             proxy = self.proxy_manager.get_next_proxy()
+            if not proxy:
+                logger.error("❌ Tidak ada proxy tersedia!")
+                time.sleep(5)
+                continue
+            
             proxies = self._get_proxies_dict(proxy)
             
             try:
                 kwargs['proxies'] = proxies
                 
-                logger.debug(f"🔗 Menggunakan proxy: {proxy[0]}:{proxy[1]} ({proxy[2]}) - Attempt {attempt + 1}")
+                logger.debug(f"🔗 Menggunakan proxy: {proxy[0]}:{proxy[1]} ({proxy[2]})")
                 
                 if method.upper() == 'GET':
                     response = self.session.get(url, **kwargs)
@@ -321,65 +535,19 @@ class ProxySession:
                     self.current_proxy = proxy
                     return response
                 else:
-                    try:
-                        error_preview = response.text[:100]
-                        logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}: {error_preview}")
-                    except:
-                        logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}")
+                    logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}")
+                    self.proxy_manager.mark_failed(proxy)
                     
-                    self.proxy_manager.mark_failed(proxy, f"HTTP {response.status_code}")
-                    
-                    if response.status_code in [400, 502, 503, 504]:
-                        logger.info(f"⏭️ Skip proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}")
-                        continue
-                    
-            except requests.exceptions.ProxyError as e:
-                error_msg = str(e)[:100]
-                logger.warning(f"❌ Proxy error dengan {proxy[0]}:{proxy[1]} - {error_msg}")
-                self.proxy_manager.mark_failed(proxy, "ProxyError")
-                last_error = e
-                
-            except requests.exceptions.SSLError as e:
-                logger.warning(f"🔒 SSL error dengan {proxy[0]}:{proxy[1]} - {str(e)[:100]}")
-                self.proxy_manager.mark_failed(proxy, "SSLError")
-                last_error = e
-                
-            except requests.exceptions.Timeout:
-                logger.warning(f"⏱️ Timeout dengan proxy {proxy[0]}:{proxy[1]}")
-                self.proxy_manager.mark_failed(proxy, "Timeout")
-                last_error = "Timeout"
-                
-            except requests.exceptions.ConnectionError as e:
-                error_msg = str(e)[:100]
-                logger.warning(f"🔌 Connection error dengan {proxy[0]}:{proxy[1]} - {error_msg}")
-                self.proxy_manager.mark_failed(proxy, "ConnectionError")
-                last_error = e
-                
             except Exception as e:
                 error_msg = str(e)[:100]
                 logger.warning(f"❌ Error dengan proxy {proxy[0]}:{proxy[1]} - {error_msg}")
-                self.proxy_manager.mark_failed(proxy, "UnknownError")
+                self.proxy_manager.mark_failed(proxy)
                 last_error = e
             
             if attempt < max_retries - 1:
                 time.sleep(1)
         
-        # Fallback tanpa proxy
-        try:
-            logger.info("🔄 Mencoba tanpa proxy (fallback)...")
-            kwargs.pop('proxies', None)
-            if method.upper() == 'GET':
-                response = self.session.get(url, **kwargs)
-            else:
-                response = self.session.post(url, **kwargs)
-            
-            if response.status_code < 400:
-                logger.info("✅ Berhasil tanpa proxy")
-                return response
-        except Exception as e:
-            logger.warning(f"⚠️ Fallback tanpa proxy juga gagal: {str(e)[:100]}")
-        
-        raise Exception(f"Semua proxy gagal setelah {max_retries} percobaan. Error terakhir: {last_error}")
+        raise Exception(f"Semua proxy gagal. Error terakhir: {last_error}")
 
 class TrustPositifChecker:
     def __init__(self):
@@ -406,7 +574,7 @@ class TrustPositifChecker:
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
                 'Referer': f'{self.base_url}/',
                 'Origin': self.base_url,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
                 'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
             }
@@ -478,30 +646,13 @@ class TrustPositifChecker:
                 domain_lower = domain.lower()
                 
                 if domain_lower in html_lower:
-                    domain_index = html_lower.find(domain_lower)
-                    start = max(0, domain_index - 100)
-                    end = min(len(html_lower), domain_index + 150)
-                    context = html_lower[start:end]
-                    
-                    if 'tidak ada' in context:
+                    if 'tidak ada' in html_lower:
                         logger.info(f"✅ HTML: {domain} aman")
                     else:
-                        if f'<td>{domain_lower}</td>' in html_lower:
-                            import re
-                            pattern = f'<td>{domain_lower}</td>.*?<td>(.*?)</td>'
-                            match = re.search(pattern, html_lower, re.DOTALL)
-                            if match:
-                                status = match.group(1).strip()
-                                if status != 'tidak ada':
-                                    blocked_domains.append(f"{domain} ({status})")
-                                    logger.warning(f"🚫 HTML: {domain} -> {status}")
-                                else:
-                                    logger.info(f"✅ HTML: {domain} aman")
-                        else:
-                            blocked_domains.append(f"{domain} (terdeteksi)")
-                            logger.warning(f"⚠️ HTML: {domain} terdeteksi tapi status tidak jelas")
+                        blocked_domains.append(f"{domain} (terdeteksi)")
+                        logger.warning(f"⚠️ HTML: {domain} terdeteksi")
                 else:
-                    logger.info(f"✅ {domain}: Tidak ditemukan dalam response (asumsi aman)")
+                    logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
         
         except Exception as e:
             logger.error(f"❌ HTML parse error: {e}")
@@ -523,23 +674,11 @@ class TrustPositifChecker:
                 
                 logger.info(f"📦 Batch {batch_count}: {len(batch)} domain")
                 
-                max_retries = 2
-                for retry in range(max_retries):
-                    try:
-                        blocked_batch = self.check_batch_5_domains(batch)
-                        all_blocked.extend(blocked_batch)
-                        break
-                    except Exception as e:
-                        if retry < max_retries - 1:
-                            logger.warning(f"⚠️ Batch {batch_count} gagal, retry {retry + 2}/{max_retries}...")
-                            time.sleep(2)
-                        else:
-                            logger.error(f"❌ Batch {batch_count} gagal setelah {max_retries} percobaan: {e}")
+                blocked_batch = self.check_batch_5_domains(batch)
+                all_blocked.extend(blocked_batch)
                 
                 if i + batch_size < len(domains):
-                    delay = 2
-                    logger.info(f"⏳ Menunggu {delay} detik sebelum batch berikutnya...")
-                    time.sleep(delay)
+                    time.sleep(2)
             
             logger.info(f"📊 Total batch diproses: {batch_count}")
             return all_blocked
@@ -592,7 +731,7 @@ async def kirim_status():
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
             f"🔢 **Batch:** 5 domain/request\n"
-            f"🌐 **Proxy Pool:** {len(PROXY_LIST)} proxy (auto-update dari proxy5.net)\n"
+            f"🌐 **Proxy Pool:** {len(PROXY_LIST)} proxy (auto-update)\n"
             f"🔄 **SSL Verify:** Disabled\n\n"
             "_Bot akan mengecek domain setiap 15 menit_"
         )
@@ -619,14 +758,6 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
                 "Tidak ada domain yang nawala."
             )
-            
-            await application.bot.send_message(
-                chat_id=CHAT_ID,
-                text=message,
-                parse_mode="Markdown"
-            )
-            logger.info(f"📤 Laporan aman: {total_domains} domain")
-            
         else:
             domain_list = ""
             for i, domain_info in enumerate(blocked_domains, 1):
@@ -639,56 +770,16 @@ async def kirim_laporan(blocked_domains, total_domains):
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
             )
-            
-            if len(message) > 4096:
-                await kirim_pesan_terbagi(blocked_domains, total_domains)
-            else:
-                await application.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=message,
-                    parse_mode="Markdown"
-                )
-                logger.info(f"📤 Laporan terblokir: {blocked_count} domain")
+        
+        await application.bot.send_message(
+            chat_id=CHAT_ID,
+            text=message,
+            parse_mode="Markdown"
+        )
+        logger.info(f"📤 Laporan terkirim: {blocked_count} domain terblokir")
             
     except Exception as e:
         logger.error(f"❌ Gagal kirim laporan: {e}")
-
-async def kirim_pesan_terbagi(blocked_domains, total_domains):
-    try:
-        blocked_count = len(blocked_domains)
-        chunk_size = 20
-        chunks = [blocked_domains[i:i + chunk_size] for i in range(0, len(blocked_domains), chunk_size)]
-        
-        for i, chunk in enumerate(chunks, 1):
-            domain_list = ""
-            for j, domain_info in enumerate(chunk, 1):
-                domain_list += f"{(i-1)*chunk_size + j}. 🚫 `{domain_info}`\n"
-            
-            message = (
-                f"🚨 *LAPORAN DOMAIN TERBLOKIR (Bagian {i}/{len(chunks)})*\n\n"
-                f"{domain_list}\n"
-            )
-            
-            if i == len(chunks):
-                message += (
-                    f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
-                    f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                    "_Sumber: trustpositif.komdigi.go.id_"
-                )
-            
-            await application.bot.send_message(
-                chat_id=CHAT_ID,
-                text=message,
-                parse_mode="Markdown"
-            )
-            
-            if i < len(chunks):
-                await asyncio.sleep(1)
-        
-        logger.info(f"📤 Laporan terbagi: {blocked_count} domain dalam {len(chunks)} pesan")
-        
-    except Exception as e:
-        logger.error(f"❌ Gagal kirim pesan terbagi: {e}")
 
 async def cek_domain_job():
     try:
@@ -737,58 +828,27 @@ async def schedule_runner():
             logger.error(f"❌ Error dalam schedule runner: {e}")
             await asyncio.sleep(5)
 
-async def test_koneksi():
-    try:
-        logger.info("🔗 Testing koneksi ke trustpositif.komdigi.go.id dengan proxy...")
-        
-        proxy_session = ProxySession()
-        
-        response = proxy_session.get(
-            "https://trustpositif.komdigi.go.id/",
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            if 'TrustPositif' in response.text:
-                logger.info("✅ Koneksi BERHASIL - TrustPositif terdeteksi")
-                return True
-            else:
-                logger.warning("⚠️ Koneksi OK tapi halaman tidak sesuai")
-                return False
-        else:
-            logger.warning(f"⚠️ HTTP Status: {response.status_code}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Test koneksi GAGAL: {e}")
-        return False
-
 async def main():
     print("\n" + "=" * 60)
     print("🚀 TRUSTPOSITIF KOMINFO DOMAIN MONITORING BOT")
     print("=" * 60)
-    
-    # Inisialisasi proxy
-    print("🌐 Menginisialisasi daftar proxy...")
-    if init_proxies():
-        print(f"✅ {len(PROXY_LIST)} proxy siap digunakan")
-    else:
-        print("⚠️ Menggunakan proxy default")
-    
-    print(f"🔒 SSL Verification: Disabled")
+    print("🌐 Mencari proxy yang bekerja... (ini mungkin memakan waktu)")
     print("=" * 60)
     
     logger.info("Bot starting...")
     
-    # Test koneksi
-    logger.info("Testing connection with proxy rotation...")
-    if not await test_koneksi():
-        logger.warning("⚠️ Koneksi bermasalah, bot tetap berjalan...")
+    # Cari proxy sampai dapat
+    proxy_manager = ProxyManager()
+    
+    # Kirim status awal jika ada proxy
+    if proxy_manager.proxies:
+        logger.info(f"✅ Bot siap dengan {len(proxy_manager.proxies)} proxy")
+        await kirim_status()
     else:
-        logger.info("✅ Koneksi OK")
+        logger.error("❌ Bot gagal mendapatkan proxy!")
+        return
     
-    await kirim_status()
-    
+    # Setup schedule
     logger.info("Setting up schedule...")
     
     schedule.every(15).minutes.do(lambda: run_async_job(cek_domain_job))
@@ -797,23 +857,22 @@ async def main():
     schedule.every(3).hours.do(lambda: run_async_job(kirim_status))
     logger.info("✅ Schedule: Status report every 3 hours")
     
-    # Refresh proxy setiap 6 jam
+    # Refresh proxy setiap 2 jam
     def refresh_proxy_job():
         logger.info("🔄 Menjadwalkan refresh proxy...")
-        fetch_proxies_from_web()
-    schedule.every(6).hours.do(refresh_proxy_job)
-    logger.info("✅ Schedule: Refresh proxy every 6 hours")
+        fetch_and_test_proxies()
+    schedule.every(2).hours.do(refresh_proxy_job)
+    logger.info("✅ Schedule: Refresh proxy every 2 hours")
     
     logger.info("Running first check in 5 seconds...")
     await asyncio.sleep(5)
     await cek_domain_job()
     
     logger.info("✅ Bot successfully started!")
-    logger.info(f"📍 Proxy pool: {len(PROXY_LIST)} proxies (auto-update from proxy5.net)")
+    logger.info(f"📍 Proxy pool: {len(PROXY_LIST)} proxies")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
-    logger.info("📍 Proxy refresh: Every 6 hours")
-    logger.info("📍 Batch size: 5 domains per request")
+    logger.info("📍 Proxy refresh: Every 2 hours")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     await schedule_runner()
