@@ -27,11 +27,8 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # Proxy configuration
-PROXY_HOST = "193.5.64.24"
-PROXY_PORT_SOCKS5 = 59101
-PROXY_PORT_HTTP = 59100
-PROXY_USERNAME = "pulsaslot1888"
-PROXY_PASSWORD = "b3Kft6IMwG"
+PROXY_HOST = "114.4.168.140"
+PROXY_PORT_HTTP = 80
 
 if not TOKEN or not CHAT_ID:
     logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
