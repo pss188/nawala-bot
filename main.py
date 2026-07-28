@@ -1,812 +1,1048 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+AMAROK Nawacek Domain Monitoring Bot
+Telegram bot untuk mengecek status domain terhadap sistem Nawala/TrustPositif
+Menggunakan API dari nawacek.id (Paket Silver/Gold)
+"""
+
 import os
 import sys
+import json
 import time
-import requests
 import asyncio
 import logging
-import schedule
-import json
-import random
 import re
-from telegram.ext import Application
+from typing import List, Dict, Optional, Any
 from datetime import datetime
-from bs4 import BeautifulSoup
+from dataclasses import dataclass, asdict
+from pathlib import Path
 
-# Setup logging
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+import requests
+import aiohttp
+import schedule
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from dotenv import load_dotenv
 
-# Config
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+# Load environment variables
+load_dotenv()
 
-if not TOKEN or not CHAT_ID:
-    logger.error("TOKEN atau CHAT_ID tidak ditemukan!")
-    sys.exit(1)
+# ==================== LOGGING SETUP ====================
 
-# ============= PROXY CONFIGURATION =============
-# Proxy dengan autentikasi
-PROXY_IPS = [
-    "193.5.64.205",
-    "193.5.64.160", 
-    "193.5.64.163",
-    "193.5.64.183",
-    "193.5.64.101"
-]
-
-PROXY_USERNAME = "pulsaslot18880CWCH"
-PROXY_PASSWORD = "b7qufiNuAD"
-PROXY_PORT_HTTP = "50100"
-PROXY_PORT_SOCKS5 = "50101"
-
-# Buat daftar proxy dari IP yang diberikan
-def build_proxy_list():
-    proxies = []
-    for ip in PROXY_IPS:
-        # HTTP/HTTPS proxy
-        proxies.append((ip, int(PROXY_PORT_HTTP), "http", "transparent"))
-        # SOCKS5 proxy
-        proxies.append((ip, int(PROXY_PORT_SOCKS5), "socks5", "transparent"))
-    return proxies
-
-# Proxy dengan autentikasi untuk digunakan di requests
-def get_proxy_url(host, port, protocol):
-    """Buat URL proxy dengan autentikasi"""
-    if protocol == "http":
-        return f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{host}:{port}"
-    elif protocol == "socks5":
-        return f"socks5://{PROXY_USERNAME}:{PROXY_PASSWORD}@{host}:{port}"
-    else:
-        return f"{protocol}://{PROXY_USERNAME}:{PROXY_PASSWORD}@{host}:{port}"
-
-# Global proxy list
-PROXY_LIST = build_proxy_list()
-
-def fetch_proxies_from_proxy5(proxy_to_use=None):
-    """Ambil daftar proxy dari proxy5.net menggunakan proxy yang diberikan"""
-    global PROXY_LIST
+def setup_logging():
+    """Setup logging configuration"""
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    try:
-        logger.info("🌐 Mengambil daftar proxy dari proxy5.net...")
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        
-        # Gunakan proxy yang diberikan
-        proxies = None
-        if proxy_to_use:
-            host, port, protocol, _ = proxy_to_use
-            proxy_url = get_proxy_url(host, port, protocol)
-            proxies = {'http': proxy_url, 'https': proxy_url}
-            logger.info(f"🔗 Menggunakan proxy: {host}:{port} ({protocol})")
-        
-        response = requests.get(
-            "https://proxy5.net/free-proxy/indonesia",
-            headers=headers,
-            proxies=proxies,
-            timeout=20,
-            verify=False
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(log_format))
+    
+    # File handler
+    file_handler = logging.FileHandler('bot.log')
+    file_handler.setFormatter(logging.Formatter(log_format))
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+# ==================== CONFIGURATION ====================
+
+@dataclass
+class Config:
+    """Bot configuration"""
+    # Telegram
+    telegram_token: str
+    telegram_chat_id: str
+    
+    # Nawacek API
+    nawacek_api_key: str
+    api_base_url: str = "https://nawacek.id"
+    api_endpoint: str = "/api/v1/check"
+    
+    # Bot settings
+    check_interval: int = 15  # minutes
+    status_interval: int = 180  # minutes
+    batch_size: int = 5
+    max_retries: int = 3
+    timeout: int = 15
+    delay_between_batches: int = 2  # seconds
+    
+    # Proxy (optional)
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    
+    @classmethod
+    def from_env(cls) -> 'Config':
+        """Load configuration from environment variables"""
+        return cls(
+            telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            nawacek_api_key=os.getenv("NAWACEK_API_KEY", ""),
+            api_base_url=os.getenv("API_BASE_URL", "https://nawacek.id"),
+            api_endpoint=os.getenv("API_ENDPOINT", "/api/v1/check"),
+            check_interval=int(os.getenv("CHECK_INTERVAL", "15")),
+            status_interval=int(os.getenv("STATUS_INTERVAL", "180")),
+            batch_size=int(os.getenv("BATCH_SIZE", "5")),
+            max_retries=int(os.getenv("MAX_RETRIES", "3")),
+            timeout=int(os.getenv("TIMEOUT", "15")),
+            delay_between_batches=int(os.getenv("DELAY_BETWEEN_BATCHES", "2")),
+            proxy_host=os.getenv("PROXY_HOST"),
+            proxy_port=int(os.getenv("PROXY_PORT")) if os.getenv("PROXY_PORT") else None,
+            proxy_username=os.getenv("PROXY_USERNAME"),
+            proxy_password=os.getenv("PROXY_PASSWORD")
         )
-        
-        if response.status_code != 200:
-            logger.warning(f"⚠️ Gagal mengambil proxy: HTTP {response.status_code}")
-            return False
-        
-        # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Cari tabel proxy
-        table = soup.find('table', {'id': 'proxylister-table'})
-        if not table:
-            tables = soup.find_all('table')
-            for t in tables:
-                if 'IP Address' in str(t) or 'Port' in str(t):
-                    table = t
-                    break
-        
-        if not table:
-            logger.warning("⚠️ Tabel proxy tidak ditemukan")
-            return False
-        
-        # Parse baris tabel
-        rows = table.find_all('tr')
-        new_proxies = []
-        protocol_map = {
-            'HTTP': 'http',
-            'HTTPS': 'http',
-            'SOCKS4': 'socks4',
-            'SOCKS5': 'socks5'
-        }
-        
-        for row in rows[1:]:
-            cols = row.find_all('td')
-            if len(cols) >= 3:
-                try:
-                    ip_text = cols[0].get_text(strip=True)
-                    port_text = cols[1].get_text(strip=True)
-                    protocol_text = cols[2].get_text(strip=True).upper()
-                    
-                    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_text):
-                        continue
-                    
-                    port = int(port_text)
-                    if port < 1 or port > 65535:
-                        continue
-                    
-                    protocols = []
-                    for proto in ['HTTP', 'HTTPS', 'SOCKS4', 'SOCKS5']:
-                        if proto in protocol_text:
-                            mapped = protocol_map.get(proto)
-                            if mapped and mapped not in protocols:
-                                protocols.append(mapped)
-                    
-                    if not protocols:
-                        protocols = ['http']
-                    
-                    for proto in protocols:
-                        proxy_tuple = (ip_text, port, proto, 'transparent')
-                        if proxy_tuple not in new_proxies:
-                            new_proxies.append(proxy_tuple)
-                            
-                except (ValueError, IndexError, AttributeError):
-                    continue
-        
-        if new_proxies:
-            # Tambahkan proxy baru ke daftar yang sudah ada
-            existing_ips = set([p[0] for p in PROXY_LIST])
-            for p in new_proxies:
-                if p[0] not in existing_ips:
-                    PROXY_LIST.append(p)
-            
-            logger.info(f"✅ Berhasil menambahkan {len(new_proxies)} proxy dari proxy5.net")
-            logger.info(f"📊 Total proxy: {len(PROXY_LIST)}")
-            
-            # Simpan ke cache
-            try:
-                with open('proxy_cache.json', 'w') as f:
-                    json.dump(PROXY_LIST, f)
-            except:
-                pass
-            
-            return True
-        else:
-            logger.warning("⚠️ Tidak ada proxy yang valid ditemukan")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Error mengambil proxy: {e}")
-        return False
 
-def load_proxy_cache():
-    """Muat proxy dari cache"""
-    global PROXY_LIST
+def load_config_file() -> Dict[str, Any]:
+    """Load additional configuration from config.json"""
+    config_file = Path("config.json")
+    if config_file.exists():
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    return {}
+
+# ==================== DOMAIN UTILITIES ====================
+
+def validate_domain(domain: str) -> bool:
+    """
+    Validate domain format
     
+    Args:
+        domain: Domain string to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    # Remove protocol and path
+    domain = re.sub(r'^https?://', '', domain)
+    domain = domain.split('/')[0]
+    
+    # Basic domain validation pattern
+    pattern = r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, domain))
+
+def extract_domain(url_or_domain: str) -> str:
+    """
+    Extract domain from URL or domain string
+    
+    Args:
+        url_or_domain: URL or domain string
+        
+    Returns:
+        Cleaned domain
+    """
+    # Remove protocol
+    domain = re.sub(r'^https?://', '', url_or_domain)
+    
+    # Remove path and query parameters
+    domain = domain.split('/')[0]
+    domain = domain.split('?')[0]
+    domain = domain.split('#')[0]
+    
+    # Remove www prefix
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    
+    return domain.lower().strip()
+
+def read_domains_from_file(filepath: str = "domain.txt") -> List[str]:
+    """
+    Read domains from file
+    
+    Args:
+        filepath: Path to domain file
+        
+    Returns:
+        List of valid domains
+    """
     try:
-        if os.path.exists('proxy_cache.json'):
-            with open('proxy_cache.json', 'r') as f:
-                cached_proxies = json.load(f)
-                if cached_proxies and len(cached_proxies) > 0:
-                    # Gabungkan dengan proxy yang sudah ada
-                    existing_ips = set([p[0] for p in PROXY_LIST])
-                    for p in cached_proxies:
-                        if p[0] not in existing_ips:
-                            PROXY_LIST.append(p)
-                    logger.info(f"📂 Memuat {len(cached_proxies)} proxy dari cache")
-                    return True
-    except Exception as e:
-        logger.warning(f"⚠️ Gagal memuat cache: {e}")
-    
-    return False
-
-def init_proxies():
-    """Inisialisasi daftar proxy"""
-    global PROXY_LIST
-    
-    # Proxy dengan autentikasi sudah ada di PROXY_LIST
-    logger.info(f"✅ Proxy dengan autentikasi: {len(PROXY_LIST)} proxy")
-    
-    # Coba ambil tambahan dari proxy5.net
-    if PROXY_LIST:
-        # Gunakan proxy pertama yang ada
-        proxy_to_use = PROXY_LIST[0]
-        fetch_proxies_from_proxy5(proxy_to_use)
-    
-    # Jika masih kurang dari 5 proxy, coba dari cache
-    if len(PROXY_LIST) < 5:
-        load_proxy_cache()
-    
-    logger.info(f"📊 Total proxy: {len(PROXY_LIST)}")
-    return True
-
-def test_proxy(proxy):
-    """Test apakah proxy bekerja"""
-    try:
-        host, port, protocol, _ = proxy
-        proxy_url = get_proxy_url(host, port, protocol)
-        proxies = {'http': proxy_url, 'https': proxy_url}
-        
-        response = requests.get(
-            "https://trustpositif.komdigi.go.id/",
-            proxies=proxies,
-            timeout=10,
-            verify=False,
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        )
-        
-        if response.status_code == 200 and 'TrustPositif' in response.text:
-            return True
-    except Exception as e:
-        logger.debug(f"Test proxy {proxy[0]}:{proxy[1]} gagal: {str(e)[:50]}")
-    return False
-
-class ProxyManager:
-    """Manajer proxy dengan rotasi dan failover"""
-    
-    def __init__(self):
-        self.proxies = PROXY_LIST.copy()
-        self.working_proxies = []
-        self.current_index = 0
-        self.failed_proxies = {}
-        self.last_refresh = 0
-        self.refresh_interval = 1800  # 30 menit
-        
-        # Inisialisasi
-        self._ensure_working_proxies()
-    
-    def _get_proxy_url_with_auth(self, proxy):
-        """Dapatkan URL proxy dengan autentikasi"""
-        if not proxy:
-            return None
-        host, port, protocol, _ = proxy
-        return get_proxy_url(host, port, protocol)
-    
-    def _ensure_working_proxies(self):
-        """Pastikan ada proxy yang bekerja"""
-        if not self.working_proxies:
-            logger.info("🔍 Mencari proxy yang bekerja...")
-            # Test semua proxy
-            for proxy in self.proxies[:20]:  # Test maksimal 20 proxy
-                if test_proxy(proxy):
-                    self.working_proxies.append(proxy)
-                    logger.info(f"✅ Proxy {proxy[0]}:{proxy[1]} ({proxy[2]}) BEKERJA!")
-                    # Jika sudah dapat 3, berhenti
-                    if len(self.working_proxies) >= 3:
-                        break
-                time.sleep(0.5)
-            
-            if not self.working_proxies:
-                # Jika tidak ada yang bekerja, gunakan semua proxy
-                self.working_proxies = self.proxies[:5]
-                logger.warning(f"⚠️ Tidak ada proxy yang lolos test, menggunakan {len(self.working_proxies)} proxy")
-    
-    def refresh_proxies_if_needed(self):
-        """Refresh proxy jika sudah waktunya"""
-        current_time = time.time()
-        if current_time - self.last_refresh > self.refresh_interval:
-            logger.info("🔄 Refresh proxy...")
-            
-            # Ambil proxy baru dari proxy5.net
-            if self.proxies:
-                proxy_to_use = self.proxies[0]
-                if fetch_proxies_from_proxy5(proxy_to_use):
-                    self.proxies = PROXY_LIST.copy()
-                    # Cari yang bekerja
-                    self.working_proxies = []
-                    for proxy in self.proxies[:10]:
-                        if test_proxy(proxy):
-                            self.working_proxies.append(proxy)
-                            if len(self.working_proxies) >= 3:
-                                break
-                    if self.working_proxies:
-                        logger.info(f"✅ Refresh berhasil: {len(self.working_proxies)} proxy")
-                        self.last_refresh = current_time
-    
-    def get_next_proxy(self):
-        """Dapatkan proxy berikutnya"""
-        self.refresh_proxies_if_needed()
-        
-        if not self.working_proxies:
-            self._ensure_working_proxies()
-        
-        if not self.working_proxies:
-            # Fallback ke proxy dengan autentikasi
-            self.working_proxies = PROXY_LIST[:5]
-        
-        # Cari proxy yang tidak gagal
-        attempts = 0
-        while attempts < len(self.working_proxies):
-            proxy = self.working_proxies[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.working_proxies)
-            
-            if proxy in self.failed_proxies:
-                if time.time() - self.failed_proxies[proxy] < 60:
-                    attempts += 1
-                    continue
-                else:
-                    del self.failed_proxies[proxy]
-            
-            return proxy
-        
-        # Jika semua gagal, reset
-        self.failed_proxies.clear()
-        self._ensure_working_proxies()
-        return self.working_proxies[0] if self.working_proxies else PROXY_LIST[0]
-    
-    def mark_failed(self, proxy):
-        """Tandai proxy sebagai gagal"""
-        if proxy:
-            self.failed_proxies[proxy] = time.time()
-            logger.info(f"⚠️ Proxy {proxy[0]}:{proxy[1]} ditandai gagal")
-            if proxy in self.working_proxies:
-                self.working_proxies.remove(proxy)
-    
-    def mark_success(self, proxy):
-        """Tandai proxy sebagai berhasil"""
-        if proxy and proxy in self.failed_proxies:
-            del self.failed_proxies[proxy]
-
-class ProxySession:
-    """Session dengan dukungan proxy dan autentikasi"""
-    
-    def __init__(self):
-        self.proxy_manager = ProxyManager()
-        self.session = requests.Session()
-        self.current_proxy = None
-        self._setup_session()
-    
-    def _setup_session(self):
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Connection': 'keep-alive',
-        })
-        self.session.verify = False
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    def _get_proxies_dict(self, proxy):
-        """Dapatkan dictionary proxies dengan autentikasi"""
-        if not proxy:
-            return {}
-        host, port, protocol, _ = proxy
-        proxy_url = get_proxy_url(host, port, protocol)
-        return {'http': proxy_url, 'https': proxy_url}
-    
-    def get(self, url, **kwargs):
-        return self._request('GET', url, **kwargs)
-    
-    def post(self, url, **kwargs):
-        return self._request('POST', url, **kwargs)
-    
-    def _request(self, method, url, max_retries=3, **kwargs):
-        last_error = None
-        
-        if 'timeout' not in kwargs:
-            kwargs['timeout'] = (15, 30)
-        kwargs['verify'] = False
-        
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        for attempt in range(max_retries):
-            proxy = self.proxy_manager.get_next_proxy()
-            if not proxy:
-                logger.error("❌ Tidak ada proxy tersedia!")
-                time.sleep(5)
-                continue
-            
-            proxies = self._get_proxies_dict(proxy)
-            
-            try:
-                kwargs['proxies'] = proxies
-                
-                logger.debug(f"🔗 Menggunakan proxy: {proxy[0]}:{proxy[1]} ({proxy[2]})")
-                
-                if method.upper() == 'GET':
-                    response = self.session.get(url, **kwargs)
-                else:
-                    response = self.session.post(url, **kwargs)
-                
-                if response.status_code < 400:
-                    self.proxy_manager.mark_success(proxy)
-                    self.current_proxy = proxy
-                    return response
-                else:
-                    logger.warning(f"⚠️ Proxy {proxy[0]}:{proxy[1]} - HTTP {response.status_code}")
-                    self.proxy_manager.mark_failed(proxy)
-                    
-            except Exception as e:
-                error_msg = str(e)[:100]
-                logger.warning(f"❌ Error dengan proxy {proxy[0]}:{proxy[1]} - {error_msg}")
-                self.proxy_manager.mark_failed(proxy)
-                last_error = e
-            
-            if attempt < max_retries - 1:
-                time.sleep(1)
-        
-        raise Exception(f"Semua proxy gagal. Error terakhir: {last_error}")
-
-class TrustPositifChecker:
-    def __init__(self):
-        self.proxy_session = ProxySession()
-        self.base_url = "https://trustpositif.komdigi.go.id"
-        self.csrf_token = "3835f8d38d9c0a271d2d782a70113bc2"
-        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
-    
-    def check_batch_5_domains(self, domains):
-        try:
-            if len(domains) > 5:
-                domains = domains[:5]
-            
-            domains_text = "\n".join(domains)
-            logger.info(f"🔍 Mengecek batch: {', '.join(domains)}")
-            
-            data = {
-                'csrf_token': self.csrf_token,
-                'name': domains_text
-            }
-            
-            headers = {
-                'X-Requested-With': 'XMLHttpRequest',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Referer': f'{self.base_url}/',
-                'Origin': self.base_url,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-            }
-            
-            response = self.proxy_session.post(
-                self.api_url,
-                data=data,
-                headers=headers
-            )
-            
-            logger.info(f"📡 Response status: {response.status_code}")
-            
-            if response.status_code == 200:
-                return self.parse_api_response(response.text, domains)
-            else:
-                logger.error(f"❌ HTTP Error {response.status_code}")
-                return []
-                
-        except Exception as e:
-            logger.error(f"❌ Error checking batch: {e}")
-            return []
-    
-    def parse_api_response(self, response_text, original_domains):
-        blocked_domains = []
-        
-        try:
-            try:
-                result = json.loads(response_text)
-                
-                if 'values' in result:
-                    domain_status_map = {}
-                    
-                    for item in result['values']:
-                        if isinstance(item, dict):
-                            domain = item.get('Domain', '').strip().lower()
-                            status = item.get('Status', '').strip()
-                            if domain:
-                                domain_status_map[domain] = status
-                    
-                    for domain in original_domains:
-                        domain_lower = domain.lower()
-                        status = domain_status_map.get(domain_lower, '')
-                        
-                        if status == 'Tidak Ada':
-                            logger.info(f"✅ {domain}: Aman")
-                        elif status:
-                            blocked_domains.append(f"{domain} ({status})")
-                            logger.warning(f"🚫 {domain}: {status}")
-                        else:
-                            logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
-                
-                return blocked_domains
-                
-            except json.JSONDecodeError:
-                logger.warning("⚠️ Response bukan JSON, mencoba parse HTML")
-                return self.parse_html_response(response_text, original_domains)
-                
-        except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
-            return []
-    
-    def parse_html_response(self, html, domains):
-        blocked_domains = []
-        
-        try:
-            html_lower = html.lower()
-            
-            for domain in domains:
-                domain_lower = domain.lower()
-                
-                if domain_lower in html_lower:
-                    if 'tidak ada' in html_lower:
-                        logger.info(f"✅ HTML: {domain} aman")
-                    else:
-                        blocked_domains.append(f"{domain} (terdeteksi)")
-                        logger.warning(f"⚠️ HTML: {domain} terdeteksi")
-                else:
-                    logger.info(f"✅ {domain}: Tidak ditemukan (asumsi aman)")
-        
-        except Exception as e:
-            logger.error(f"❌ HTML parse error: {e}")
-        
-        return blocked_domains
-    
-    def check_all_domains(self, domains):
-        try:
-            if not domains:
-                return []
-            
-            all_blocked = []
-            batch_size = 5
-            batch_count = 0
-            
-            for i in range(0, len(domains), batch_size):
-                batch = domains[i:i + batch_size]
-                batch_count += 1
-                
-                logger.info(f"📦 Batch {batch_count}: {len(batch)} domain")
-                
-                max_retries = 2
-                for retry in range(max_retries):
-                    try:
-                        blocked_batch = self.check_batch_5_domains(batch)
-                        all_blocked.extend(blocked_batch)
-                        break
-                    except Exception as e:
-                        if retry < max_retries - 1:
-                            logger.warning(f"⚠️ Batch {batch_count} gagal, retry {retry + 2}/{max_retries}...")
-                            time.sleep(2)
-                        else:
-                            logger.error(f"❌ Batch {batch_count} gagal: {e}")
-                
-                if i + batch_size < len(domains):
-                    time.sleep(2)
-            
-            logger.info(f"📊 Total batch diproses: {batch_count}")
-            return all_blocked
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking all domains: {e}")
-            return []
-
-def baca_domain():
-    try:
-        if not os.path.exists("domain.txt"):
-            logger.error("❌ File domain.txt tidak ditemukan!")
-            with open("domain.txt", "w") as f:
-                f.write("# Daftar domain untuk dicek\n")
-                f.write("# Satu domain per baris\n")
-                f.write("google.com\n")
-                f.write("facebook.com\n")
-            logger.info("✅ File domain.txt dibuat dengan contoh")
+        if not os.path.exists(filepath):
+            logger.warning(f"⚠️ File {filepath} tidak ditemukan")
+            create_sample_domain_file(filepath)
             return []
         
         domains = []
-        with open("domain.txt", "r") as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
-                if line and not line.startswith('#'):
-                    line = line.lower()
-                    for prefix in ['http://', 'https://', 'www.']:
-                        if line.startswith(prefix):
-                            line = line[len(prefix):]
-                    line = line.rstrip('/')
-                    if '.' in line and len(line) > 3:
-                        domains.append(line)
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                # Clean domain
+                domain = extract_domain(line)
+                if validate_domain(domain):
+                    domains.append(domain)
+                else:
+                    logger.warning(f"⚠️ Format domain tidak valid: {line}")
         
-        logger.info(f"📖 Membaca {len(domains)} domain dari domain.txt")
+        logger.info(f"📖 Membaca {len(domains)} domain dari {filepath}")
         return domains
         
     except Exception as e:
         logger.error(f"❌ Error membaca domain: {e}")
         return []
 
-async def kirim_status():
+def create_sample_domain_file(filepath: str = "domain.txt"):
+    """Create sample domain file if not exists"""
+    sample_content = """# Daftar domain untuk dicek terhadap Nawala/TrustPositif
+# Satu domain per baris
+# Baris yang diawali # akan diabaikan
+
+# Contoh domain (ganti dengan domain Anda)
+google.com
+facebook.com
+twitter.com
+youtube.com
+
+# Domain yang sering diblokir di Indonesia
+# (contoh untuk testing)
+thepiratebay.org
+123movies.com
+"""
+
     try:
-        waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        domains = baca_domain()
-        domain_count = len(domains)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(sample_content)
+        logger.info(f"✅ File {filepath} dibuat dengan contoh")
+    except Exception as e:
+        logger.error(f"❌ Gagal membuat file contoh: {e}")
+
+# ==================== NAWACEK API CLIENT ====================
+
+class NawacekAPIError(Exception):
+    """Custom exception for Nawacek API errors"""
+    pass
+
+class NawacekClient:
+    """
+    Client for nawacek.id API
+    Requires Silver/Gold subscription
+    """
+    
+    def __init__(self, config: Config):
+        """
+        Initialize Nawacek API client
         
-        # Hitung jumlah proxy
-        total_proxy = len(PROXY_LIST)
-        working_count = len(ProxyManager().working_proxies) if hasattr(ProxyManager(), 'working_proxies') else 0
+        Args:
+            config: Bot configuration
+        """
+        self.config = config
+        self.api_key = config.nawacek_api_key
+        self.base_url = config.api_base_url
+        self.endpoint = config.api_endpoint
+        self.timeout = config.timeout
+        self.session = None
         
-        message = (
-            "🤖 *TrustPositif Monitoring Bot*\n\n"
-            f"✅ **Status:** Aktif & Berjalan\n"
-            f"⏰ **Waktu:** {waktu}\n"
-            f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔢 **Batch:** 5 domain/request\n"
-            f"🌐 **Proxy Pool:** {total_proxy} proxy\n"
-            f"🔑 **Auth Proxy:** {len(PROXY_IPS)} IP dengan autentikasi\n"
-            f"🔄 **SSL Verify:** Disabled\n\n"
-            "_Bot akan mengecek domain setiap 15 menit_"
-        )
+        # Validate API key
+        if not self.api_key:
+            logger.error("❌ NAWACEK_API_KEY tidak ditemukan!")
+            raise ValueError("NAWACEK_API_KEY is required")
         
+        # Setup proxy if configured
+        self.proxy = None
+        if config.proxy_host and config.proxy_port:
+            proxy_url = f"http://{config.proxy_host}:{config.proxy_port}"
+            if config.proxy_username and config.proxy_password:
+                proxy_url = f"http://{config.proxy_username}:{config.proxy_password}@{config.proxy_host}:{config.proxy_port}"
+            self.proxy = proxy_url
+            logger.info(f"🔗 Proxy configured: {config.proxy_host}:{config.proxy_port}")
+    
+    async def __aenter__(self):
+        """Async context manager entry"""
+        await self.create_session()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        await self.close_session()
+    
+    async def create_session(self):
+        """Create aiohttp session"""
+        if self.session is None:
+            connector = None
+            if self.proxy:
+                connector = aiohttp.TCPConnector(
+                    limit=10,
+                    ttl_dns_cache=300
+                )
+            
+            self.session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                headers={
+                    'Authorization': f'Bearer {self.api_key}',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'AMAROK-Bot/2.0'
+                }
+            )
+            logger.info("✅ Session created")
+    
+    async def close_session(self):
+        """Close aiohttp session"""
+        if self.session:
+            await self.session.close()
+            self.session = None
+            logger.info("Session closed")
+    
+    async def check_domains(self, domains: List[str]) -> Dict[str, str]:
+        """
+        Check domains against Nawala system
+        
+        Args:
+            domains: List of domains (max 5 per request)
+            
+        Returns:
+            Dictionary {domain: status} where status is 'ALLOWED', 'BLOCKED', or 'UNKNOWN'
+            
+        Raises:
+            NawacekAPIError: If API request fails
+        """
+        if len(domains) > 5:
+            logger.warning(f"⚠️ Batch terlalu besar ({len(domains)}), dipotong ke 5")
+            domains = domains[:5]
+        
+        if not domains:
+            return {}
+        
+        try:
+            # Ensure session exists
+            if self.session is None:
+                await self.create_session()
+            
+            # Prepare request
+            url = f"{self.base_url}{self.endpoint}"
+            payload = {"domains": domains}
+            
+            logger.info(f"🔍 Mengecek {len(domains)} domain: {', '.join(domains)}")
+            
+            # Make request with retries
+            for attempt in range(self.config.max_retries):
+                try:
+                    async with self.session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            # Parse response - adjust based on actual API response structure
+                            return self._parse_response(data, domains)
+                        elif response.status == 401:
+                            logger.error("❌ API Key tidak valid atau expired")
+                            raise NawacekAPIError("Invalid or expired API key")
+                        elif response.status == 429:
+                            logger.warning("⚠️ Rate limit exceeded, waiting...")
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"❌ API Error {response.status}: {error_text}")
+                            if attempt < self.config.max_retries - 1:
+                                await asyncio.sleep(1)
+                                continue
+                            raise NawacekAPIError(f"API returned {response.status}: {error_text}")
+                
+                except aiohttp.ClientError as e:
+                    logger.warning(f"⚠️ Request failed (attempt {attempt + 1}): {e}")
+                    if attempt < self.config.max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    raise NawacekAPIError(f"Request failed after {self.config.max_retries} attempts: {e}")
+            
+            return {}
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking domains: {e}")
+            return {}
+    
+    def _parse_response(self, data: Dict[str, Any], original_domains: List[str]) -> Dict[str, str]:
+        """
+        Parse API response
+        
+        Expected response format (adjust based on actual API):
+        {
+            "data": {
+                "domain1.com": "ALLOWED",
+                "domain2.com": "BLOCKED",
+                ...
+            },
+            "status": "success"
+        }
+        """
+        result = {}
+        
+        try:
+            # Try different response structures
+            if 'data' in data:
+                status_map = data['data']
+                if isinstance(status_map, dict):
+                    for domain in original_domains:
+                        status = status_map.get(domain, 'UNKNOWN')
+                        result[domain] = status
+            elif 'results' in data:
+                for item in data['results']:
+                    if isinstance(item, dict):
+                        domain = item.get('domain', '')
+                        status = item.get('status', 'UNKNOWN')
+                        if domain:
+                            result[domain] = status
+            else:
+                # If response is directly the map
+                for domain in original_domains:
+                    status = data.get(domain, 'UNKNOWN')
+                    result[domain] = status
+            
+            # Log results
+            for domain, status in result.items():
+                if status == 'BLOCKED':
+                    logger.warning(f"🚫 {domain}: {status}")
+                elif status == 'ALLOWED':
+                    logger.info(f"✅ {domain}: {status}")
+                else:
+                    logger.info(f"❓ {domain}: {status}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Error parsing response: {e}")
+            return {domain: 'UNKNOWN' for domain in original_domains}
+
+# ==================== BOT HANDLERS ====================
+
+class DomainBot:
+    """Main bot class"""
+    
+    def __init__(self):
+        """Initialize bot"""
+        self.config = Config.from_env()
+        
+        # Validate required config
+        if not self.config.telegram_token:
+            logger.error("❌ TELEGRAM_TOKEN tidak ditemukan!")
+            sys.exit(1)
+        
+        if not self.config.telegram_chat_id:
+            logger.error("❌ TELEGRAM_CHAT_ID tidak ditemukan!")
+            sys.exit(1)
+        
+        # Initialize application
+        self.application = Application.builder().token(self.config.telegram_token).build()
+        self.nawacek_client = NawacekClient(self.config)
+        self.running = False
+        
+        # Register handlers
+        self._register_handlers()
+        
+        logger.info("✅ Bot berhasil diinisialisasi")
+    
+    def _register_handlers(self):
+        """Register command handlers"""
+        self.application.add_handler(CommandHandler("start", self.cmd_start))
+        self.application.add_handler(CommandHandler("help", self.cmd_help))
+        self.application.add_handler(CommandHandler("check", self.cmd_check))
+        self.application.add_handler(CommandHandler("status", self.cmd_status))
+        self.application.add_handler(CommandHandler("domains", self.cmd_domains))
+        self.application.add_handler(CommandHandler("add", self.cmd_add_domain))
+        self.application.add_handler(CommandHandler("remove", self.cmd_remove_domain))
+        self.application.add_handler(CommandHandler("health", self.cmd_health))
+        
+        # Message handler for domain checking
+        self.application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            self.handle_message
+        ))
+    
+    # ==================== COMMAND HANDLERS ====================
+    
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /start command"""
+        welcome = f"""
+🐺 *AMAROK Nawacek Domain Monitor*
+
+Selamat datang di bot monitoring domain Nawala/TrustPositif!
+
+*Fitur:*
+• 🔍 Cek domain terhadap Nawala/TrustPositif
+• 📊 Monitor domain secara otomatis setiap {self.config.check_interval} menit
+• 📱 Notifikasi real-time via Telegram
+• 📈 Laporan status domain lengkap
+
+*Cara Penggunaan:*
+• Kirim domain atau URL untuk cek langsung
+• /check [domain] - Cek domain tertentu
+• /status - Lihat status bot
+• /domains - Lihat daftar domain yang dimonitor
+• /add domain - Tambah domain ke monitoring
+• /remove domain - Hapus domain dari monitoring
+• /help - Bantuan lengkap
+
+*Domain tersedia:* {len(read_domains_from_file())} domain
+*Interval pengecekan:* {self.config.check_interval} menit
+
+_Bot ini menggunakan API dari nawacek.id (paket Silver/Gold)_
+"""
+        await update.message.reply_text(welcome, parse_mode="Markdown")
+    
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /help command"""
+        help_text = """
+📚 *Bantuan Penggunaan Bot*
+
+*Perintah:*
+• /start - Menampilkan pesan selamat datang
+• /help - Menampilkan bantuan ini
+• /check [domain] - Cek status domain
+• /status - Status bot dan informasi
+• /domains - Daftar domain yang dimonitor
+• /add domain - Tambah domain ke monitoring
+• /remove domain - Hapus domain dari monitoring
+• /health - Cek kesehatan bot
+
+*Status Domain:*
+• ✅ ALLOWED - Domain aman, tidak diblokir
+• 🚫 BLOCKED - Domain terblokir (Nawala/TrustPositif)
+• ❓ UNKNOWN - Status tidak diketahui
+
+*Contoh:*
+• Kirim: `google.com` → Cek domain
+• Kirim: `https://example.com/path` → Otomatis ekstrak domain
+• /check facebook.com → Cek domain spesifik
+• /add domain-baru.com → Tambah ke monitoring
+
+*File Konfigurasi:*
+• `domain.txt` - Daftar domain untuk monitoring otomatis
+• `config.json` - Konfigurasi bot
+• `.env` - Environment variables (token, API key)
+"""
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+    
+    async def cmd_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /check command"""
+        if not context.args:
+            await update.message.reply_text("❌ Mohon berikan domain yang ingin dicek.\nContoh: /check google.com")
+            return
+        
+        domain = context.args[0]
+        await self._check_domain_and_reply(update, domain)
+    
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /status command"""
+        domains = read_domains_from_file()
+        total_domains = len(domains)
+        
+        status = f"""
+📊 *Status Bot*
+
+*Bot Info:*
+• Status: 🟢 Berjalan
+• Waktu: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+
+*Domain:*
+• Total domain: {total_domains}
+• Interval cek: {self.config.check_interval} menit
+
+*API:*
+• Provider: nawacek.id
+• Base URL: {self.config.api_base_url}
+• Status: {'✅ Terhubung' if self.nawacek_client.session else '⏳ Menunggu'}
+
+*Schedule:*
+• Cek domain: Setiap {self.config.check_interval} menit
+• Status report: Setiap {self.config.status_interval} menit
+"""
+        await update.message.reply_text(status, parse_mode="Markdown")
+    
+    async def cmd_domains(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /domains command"""
+        domains = read_domains_from_file()
+        
+        if not domains:
+            await update.message.reply_text("📭 Belum ada domain yang dimonitor.\nTambahkan dengan /add domain")
+            return
+        
+        # Format domain list
+        domain_list = ""
+        for i, domain in enumerate(domains[:50], 1):  # Max 50 per message
+            domain_list += f"{i}. `{domain}`\n"
+        
+        if len(domains) > 50:
+            domain_list += f"\n... dan {len(domains) - 50} domain lainnya"
+        
+        message = f"""
+📋 *Daftar Domain ({len(domains)} total)*
+
+{domain_list}
+
+_Tambahkan domain dengan /add domain_
+_Hapus dengan /remove domain_
+"""
+        await update.message.reply_text(message, parse_mode="Markdown")
+    
+    async def cmd_add_domain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /add command"""
+        if not context.args:
+            await update.message.reply_text("❌ Mohon berikan domain yang ingin ditambahkan.\nContoh: /add domain.com")
+            return
+        
+        domain_input = context.args[0]
+        domain = extract_domain(domain_input)
+        
+        if not validate_domain(domain):
+            await update.message.reply_text(f"❌ Format domain tidak valid: {domain_input}")
+            return
+        
+        # Check if domain already exists
+        existing_domains = read_domains_from_file()
+        if domain in existing_domains:
+            await update.message.reply_text(f"ℹ️ Domain `{domain}` sudah ada dalam daftar", parse_mode="Markdown")
+            return
+        
+        # Add domain to file
+        try:
+            with open("domain.txt", "a", encoding='utf-8') as f:
+                f.write(f"{domain}\n")
+            await update.message.reply_text(f"✅ Domain `{domain}` berhasil ditambahkan ke monitoring", parse_mode="Markdown")
+            logger.info(f"📝 Domain added: {domain}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Gagal menambahkan domain: {e}")
+    
+    async def cmd_remove_domain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /remove command"""
+        if not context.args:
+            await update.message.reply_text("❌ Mohon berikan domain yang ingin dihapus.\nContoh: /remove domain.com")
+            return
+        
+        domain_to_remove = extract_domain(context.args[0])
+        
+        # Read existing domains
+        domains = read_domains_from_file()
+        if domain_to_remove not in domains:
+            await update.message.reply_text(f"❌ Domain `{domain_to_remove}` tidak ditemukan", parse_mode="Markdown")
+            return
+        
+        # Remove domain from file
+        try:
+            with open("domain.txt", "r", encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            with open("domain.txt", "w", encoding='utf-8') as f:
+                for line in lines:
+                    line_domain = extract_domain(line.strip())
+                    if line_domain != domain_to_remove and not (line.strip() and not line.strip().startswith('#')):
+                        f.write(line)
+            
+            await update.message.reply_text(f"✅ Domain `{domain_to_remove}` berhasil dihapus", parse_mode="Markdown")
+            logger.info(f"📝 Domain removed: {domain_to_remove}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Gagal menghapus domain: {e}")
+    
+    async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /health command"""
+        try:
+            # Test connection to nawacek API
+            test_domains = ["google.com", "facebook.com"]
+            async with self.nawacek_client:
+                result = await self.nawacek_client.check_domains(test_domains)
+            
+            if result:
+                status = "✅ Bot sehat dan API terhubung"
+            else:
+                status = "⚠️ Bot berjalan tapi API tidak merespons"
+            
+            health = f"""
+🏥 *Health Check*
+
+*Status:* {status}
+*Uptime:* {time.time() - start_time:.0f} detik
+*Waktu:* {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+*Domain terdaftar:* {len(read_domains_from_file())}
+*API Key:* {'✅ Terkonfigurasi' if self.config.nawacek_api_key else '❌ Tidak ada'}
+"""
+            await update.message.reply_text(health, parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Health check gagal: {e}")
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle regular text messages (domain check)"""
+        text = update.message.text.strip()
+        await self._check_domain_and_reply(update, text)
+    
+    async def _check_domain_and_reply(self, update: Update, domain_input: str):
+        """Check domain and reply with result"""
+        domain = extract_domain(domain_input)
+        
+        if not validate_domain(domain):
+            await update.message.reply_text(
+                f"❌ Format domain tidak valid: `{domain_input}`\n"
+                "Contoh format yang benar:\n"
+                "• google.com\n"
+                "• example.co.id\n"
+                "• https://domain.com/path\n"
+                "• sub.domain.com",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Send typing indicator
+        await update.message.chat.send_action(action="typing")
+        
+        try:
+            # Check domain using API
+            async with self.nawacek_client:
+                result = await self.nawacek_client.check_domains([domain])
+            
+            status = result.get(domain, 'UNKNOWN')
+            
+            # Format response based on status
+            if status == 'ALLOWED':
+                emoji = "✅"
+                status_text = "AMAN"
+                description = "Domain tidak diblokir oleh Nawala/TrustPositif"
+            elif status == 'BLOCKED':
+                emoji = "🚫"
+                status_text = "TERBLOKIR"
+                description = "Domain terdeteksi diblokir oleh Nawala/TrustPositif"
+            else:
+                emoji = "❓"
+                status_text = "TIDAK DIKETAHUI"
+                description = "Status domain tidak dapat dipastikan"
+            
+            response = f"""
+{emoji} *Hasil Cek Domain*
+
+• *Domain:* `{domain}`
+• *Status:* **{status_text}**
+• *Keterangan:* {description}
+• *Waktu:* {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+• *Sumber:* nawacek.id
+
+---
+💡 _Domain ini akan dicek secara otomatis setiap {self.config.check_interval} menit_
+"""
+            await update.message.reply_text(response, parse_mode="Markdown")
+            
+        except Exception as e:
+            logger.error(f"Error checking domain {domain}: {e}")
+            await update.message.reply_text(
+                f"❌ Gagal mengecek domain `{domain}`\n"
+                f"Error: {str(e)}\n\n"
+                "Pastikan API Key valid dan terhubung dengan internet",
+                parse_mode="Markdown"
+            )
+
+# ==================== SCHEDULED JOBS ====================
+
+async def send_status_report(application: Application, chat_id: str):
+    """Send status report"""
+    try:
+        domains = read_domains_from_file()
+        total = len(domains)
+        
+        message = f"""
+🤖 *Status Monitoring Bot*
+
+✅ Status: Aktif & Berjalan
+⏰ Waktu: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+📊 Domain: {total} domain terdaftar
+🔢 Batch: {Config.from_env().batch_size} domain/request
+⏱️ Interval: {Config.from_env().check_interval} menit
+
+_Bot akan mengecek domain secara otomatis_
+"""
         await application.bot.send_message(
-            chat_id=CHAT_ID,
+            chat_id=chat_id,
             text=message,
             parse_mode="Markdown"
         )
-        logger.info("📤 Status bot terkirim")
-        
+        logger.info("📤 Status report sent")
     except Exception as e:
-        logger.error(f"❌ Gagal kirim status: {e}")
+        logger.error(f"❌ Failed to send status report: {e}")
 
-async def kirim_laporan(blocked_domains, total_domains):
-    try:
-        blocked_count = len(blocked_domains)
-        
-        if blocked_count == 0:
-            message = (
-                "✅ *LAPORAN NAWALA*\n\n"
-                "**SEMUA DOMAIN AMAN!** 🎉\n\n"
-                f"📊 **Total Domain:** {total_domains}\n"
-                f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "Tidak ada domain yang nawala."
-            )
-        else:
-            domain_list = ""
-            for i, domain_info in enumerate(blocked_domains, 1):
-                domain_list += f"{i}. 🚫 `{domain_info}`\n"
-            
-            message = (
-                "🚨 *LAPORAN DOMAIN TERBLOKIR*\n\n"
-                f"**{blocked_count} DOMAIN TERBLOKIR**\n\n"
-                f"{domain_list}\n"
-                f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
-                f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-            )
-        
-        await application.bot.send_message(
-            chat_id=CHAT_ID,
-            text=message,
-            parse_mode="Markdown"
-        )
-        logger.info(f"📤 Laporan terkirim: {blocked_count} domain terblokir")
-            
-    except Exception as e:
-        logger.error(f"❌ Gagal kirim laporan: {e}")
-
-async def cek_domain_job():
+async def check_domains_job(application: Application, chat_id: str, config: Config):
+    """Job to check all domains"""
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF KOMINFO")
+        logger.info("🔄 MEMULAI PEMERIKSAAN DOMAIN")
         logger.info("=" * 60)
         
-        domains = baca_domain()
+        # Read domains
+        domains = read_domains_from_file()
         if not domains:
             logger.warning("⚠️ Tidak ada domain untuk dicek")
             return
         
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
-        checker = TrustPositifChecker()
+        # Initialize client
+        client = NawacekClient(config)
+        blocked_domains = []
+        checked_domains = []
         
         start_time = time.time()
-        blocked_domains = checker.check_all_domains(domains)
+        
+        # Process in batches
+        for i in range(0, len(domains), config.batch_size):
+            batch = domains[i:i + config.batch_size]
+            
+            try:
+                async with client:
+                    results = await client.check_domains(batch)
+                    
+                    for domain, status in results.items():
+                        if status == 'BLOCKED':
+                            blocked_domains.append(domain)
+                        checked_domains.append(domain)
+                    
+                    # Delay between batches
+                    if i + config.batch_size < len(domains):
+                        await asyncio.sleep(config.delay_between_batches)
+                    
+            except Exception as e:
+                logger.error(f"❌ Error checking batch {batch}: {e}")
+                continue
+        
         elapsed_time = time.time() - start_time
         
-        logger.info(f"⏱️ Waktu pemrosesan: {elapsed_time:.2f} detik")
+        # Send report
+        if blocked_domains:
+            await send_blocked_report(application, chat_id, blocked_domains, len(domains))
+        else:
+            await send_safe_report(application, chat_id, len(domains))
+        
+        logger.info(f"✅ Pemeriksaan selesai dalam {elapsed_time:.2f} detik")
         logger.info(f"📊 Hasil: {len(blocked_domains)} dari {len(domains)} domain terblokir")
-        
-        await kirim_laporan(blocked_domains, len(domains))
-        
-        logger.info("✅ Pemeriksaan selesai")
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"❌ Error dalam cek_domain_job: {e}")
+        logger.error(f"❌ Error in check_domains_job: {e}")
         import traceback
         logger.error(traceback.format_exc())
 
-def run_async_job(job_func):
-    asyncio.create_task(job_func())
+async def send_blocked_report(application: Application, chat_id: str, blocked_domains: List[str], total_domains: int):
+    """Send report of blocked domains"""
+    try:
+        blocked_count = len(blocked_domains)
+        
+        # Format domain list
+        domain_list = ""
+        for i, domain in enumerate(blocked_domains, 1):
+            domain_list += f"{i}. 🚫 `{domain}`\n"
+        
+        # Check message length
+        if len(domain_list) > 3500:  # Leave room for header/footer
+            # Send in chunks
+            chunks = [blocked_domains[i:i+20] for i in range(0, len(blocked_domains), 20)]
+            
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_list = ""
+                for i, domain in enumerate(chunk, 1):
+                    chunk_list += f"{(idx-1)*20 + i}. 🚫 `{domain}`\n"
+                
+                message = f"""
+🚨 *LAPORAN DOMAIN TERBLOKIR (Bagian {idx}/{len(chunks)})*
 
-async def schedule_runner():
+{chunk_list}
+"""
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode="Markdown"
+                )
+                await asyncio.sleep(1)
+            
+            # Send summary
+            summary = f"""
+📊 *Ringkasan*
+Total domain: {total_domains}
+Terblokir: {blocked_count}
+Waktu: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+"""
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=summary,
+                parse_mode="Markdown"
+            )
+        else:
+            message = f"""
+🚨 *LAPORAN DOMAIN TERBLOKIR*
+
+**{blocked_count} DOMAIN TERBLOKIR**
+
+{domain_list}
+
+📊 *Statistik:* {blocked_count}/{total_domains} domain terblokir
+⏰ *Waktu:* {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+
+_Sumber: nawacek.id (AMAROK API)_
+"""
+            await application.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="Markdown"
+            )
+        
+        logger.info(f"📤 Laporan terblokir dikirim: {blocked_count} domain")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send blocked report: {e}")
+
+async def send_safe_report(application: Application, chat_id: str, total_domains: int):
+    """Send report when all domains are safe"""
+    try:
+        message = f"""
+✅ *LAPORAN DOMAIN AMAN*
+
+**SEMUA DOMAIN AMAN!** 🎉
+
+📊 *Total Domain:* {total_domains}
+⏰ *Waktu:* {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+
+Tidak ada domain yang terblokir oleh Nawala/TrustPositif.
+
+_Sumber: nawacek.id (AMAROK API)_
+"""
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode="Markdown"
+        )
+        logger.info(f"📤 Laporan aman dikirim: {total_domains} domain")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send safe report: {e}")
+
+# ==================== SCHEDULE RUNNER ====================
+
+async def schedule_runner(application: Application, chat_id: str, config: Config):
+    """Run scheduled jobs"""
+    global start_time
+    start_time = time.time()
+    
+    # Schedule jobs
+    schedule.every(config.check_interval).minutes.do(
+        lambda: asyncio.create_task(check_domains_job(application, chat_id, config))
+    )
+    logger.info(f"✅ Schedule: Check domains every {config.check_interval} minutes")
+    
+    schedule.every(config.status_interval).minutes.do(
+        lambda: asyncio.create_task(send_status_report(application, chat_id))
+    )
+    logger.info(f"✅ Schedule: Status report every {config.status_interval} minutes")
+    
+    # Run first check immediately (with delay)
+    logger.info("Running first check in 3 seconds...")
+    await asyncio.sleep(3)
+    await check_domains_job(application, chat_id, config)
+    
+    # Main schedule loop
     while True:
         try:
             schedule.run_pending()
             await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("🛑 Schedule runner dihentikan")
+        except asyncio.CancelledError:
+            logger.info("🛑 Schedule runner cancelled")
             break
         except Exception as e:
-            logger.error(f"❌ Error dalam schedule runner: {e}")
+            logger.error(f"❌ Error in schedule runner: {e}")
             await asyncio.sleep(5)
 
-async def main():
-    print("\n" + "=" * 60)
-    print("🚀 TRUSTPOSITIF KOMINFO DOMAIN MONITORING BOT")
-    print("=" * 60)
-    print(f"🔑 Proxy Auth: {PROXY_USERNAME}")
-    print(f"🌐 Proxy IPs: {', '.join(PROXY_IPS)}")
-    print(f"📡 HTTP/HTTPS Port: {PROXY_PORT_HTTP}")
-    print(f"📡 SOCKS5 Port: {PROXY_PORT_SOCKS5}")
-    print("=" * 60)
-    
-    logger.info("Bot starting...")
-    logger.info(f"🔑 Proxy dengan autentikasi: {len(PROXY_IPS)} IP")
-    
-    # Inisialisasi proxy
-    init_proxies()
-    logger.info(f"✅ {len(PROXY_LIST)} proxy tersedia")
-    
-    # Kirim status awal
-    await kirim_status()
-    
-    # Setup schedule
-    logger.info("Setting up schedule...")
-    
-    schedule.every(15).minutes.do(lambda: run_async_job(cek_domain_job))
-    logger.info("✅ Schedule: Check domains every 15 minutes")
-    
-    schedule.every(3).hours.do(lambda: run_async_job(kirim_status))
-    logger.info("✅ Schedule: Status report every 3 hours")
-    
-    # Refresh proxy setiap 30 menit
-    def refresh_proxy_job():
-        logger.info("🔄 Refresh proxy...")
-        if PROXY_LIST:
-            proxy_to_use = PROXY_LIST[0]
-            fetch_proxies_from_proxy5(proxy_to_use)
-    schedule.every(30).minutes.do(refresh_proxy_job)
-    logger.info("✅ Schedule: Refresh proxy every 30 minutes")
-    
-    logger.info("Running first check in 5 seconds...")
-    await asyncio.sleep(5)
-    await cek_domain_job()
-    
-    logger.info("✅ Bot successfully started!")
-    logger.info(f"📍 Proxy pool: {len(PROXY_LIST)} proxies")
-    logger.info("📍 Domain checks: Every 15 minutes")
-    logger.info("📍 Status reports: Every 3 hours")
-    logger.info("📍 Proxy refresh: Every 30 minutes")
-    logger.info("📍 Press Ctrl+C to stop\n")
-    
-    await schedule_runner()
+# ==================== MAIN ====================
 
-if __name__ == "__main__":
-    try:
-        import schedule
-        import requests
-        from telegram import __version__
-        import bs4
-        logger.info(f"✅ Dependencies: requests, schedule, python-telegram-bot v{__version__}, beautifulsoup4")
-        
-        try:
-            import requests.socks
-            logger.info("✅ SOCKS support available")
-        except ImportError:
-            logger.warning("⚠️ SOCKS support not available. Install with: pip install requests[socks]")
-            
-    except ImportError as e:
-        logger.error(f"❌ Missing dependency: {e}")
-        logger.info("💡 Install dengan: pip install -r requirements.txt")
+async def main():
+    """Main entry point"""
+    print("\n" + "=" * 60)
+    print("🐺 AMAROK NAWACEK DOMAIN MONITORING BOT")
+    print("=" * 60)
+    
+    # Load configuration
+    config = Config.from_env()
+    config_file = load_config_file()
+    
+    # Override config with file values
+    for key, value in config_file.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+    
+    # Validate configuration
+    if not config.telegram_token:
+        logger.error("❌ TELEGRAM_TOKEN tidak ditemukan di .env!")
+        logger.info("💡 Buat file .env dengan TELEGRAM_TOKEN=your_token")
         sys.exit(1)
     
+    if not config.telegram_chat_id:
+        logger.error("❌ TELEGRAM_CHAT_ID tidak ditemukan di .env!")
+        logger.info("💡 Buat file .env dengan TELEGRAM_CHAT_ID=your_chat_id")
+        sys.exit(1)
+    
+    if not config.nawacek_api_key:
+        logger.error("❌ NAWACEK_API_KEY tidak ditemukan di .env!")
+        logger.info("💡 Daftar di nawacek.id dan upgrade ke paket Silver/Gold untuk API key")
+        logger.info("💡 Buat file .env dengan NAWACEK_API_KEY=your_api_key")
+        sys.exit(1)
+    
+    # Initialize bot
+    bot = DomainBot()
+    
+    # Start bot and schedule
     try:
-        asyncio.run(main())
+        # Start the bot
+        await bot.application.initialize()
+        await bot.application.start()
+        
+        logger.info("✅ Bot started successfully!")
+        logger.info(f"📍 Chat ID: {config.telegram_chat_id}")
+        logger.info(f"📍 Domain checks: Every {config.check_interval} minutes")
+        logger.info(f"📍 Status reports: Every {config.status_interval} minutes")
+        logger.info(f"📍 Batch size: {config.batch_size} domains per request")
+        logger.info("📍 Press Ctrl+C to stop\n")
+        
+        # Send startup message
+        await bot.application.bot.send_message(
+            chat_id=config.telegram_chat_id,
+            text=f"""
+🐺 *AMAROK Bot Started!*
+
+✅ Status: Online
+⏰ Waktu: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+📊 Domain terdaftar: {len(read_domains_from_file())}
+🔄 Interval cek: {config.check_interval} menit
+🔢 Batch size: {config.batch_size} domain
+
+_Bot siap memonitor domain Anda_
+""",
+            parse_mode="Markdown"
+        )
+        
+        # Run schedule runner
+        await schedule_runner(bot.application, config.telegram_chat_id, config)
+        
     except KeyboardInterrupt:
         logger.info("\n👋 Bot stopped by user")
     except Exception as e:
         logger.error(f"💥 Critical error: {e}")
         import traceback
         logger.error(traceback.format_exc())
+    finally:
+        # Cleanup
+        if bot.application:
+            await bot.application.stop()
+            await bot.application.shutdown()
+        logger.info("Bot shutdown complete")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped by user")
+    except Exception as e:
+        print(f"💥 Critical error: {e}")
+        import traceback
+        traceback.print_exc()
