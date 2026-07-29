@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AMAROK Nawala Checker Bot
-Cek domain terblokir TrustPositif/Nawala dengan multiple methods
+Cek domain terblokir TrustPositif/Nawala dengan proxy DataImpulse
 """
 
 import os
@@ -11,8 +11,10 @@ import asyncio
 import logging
 import json
 import re
+import socket
 from datetime import datetime
 from typing import List, Tuple, Optional
+from urllib.parse import urlparse
 
 import requests
 import schedule
@@ -22,39 +24,35 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# ============ KONFIGURASI ============
-# Dibaca dari environment variables
+# ============ KONFIGURASI PROXY DATAIMPULSE ============
+# DATAIMPULSE CREDENTIALS - SEGERA GANTI PASSWORD!
+PROXY_USERNAME = os.getenv("PROXY_USERNAME", "986a4990d6e126d77bf9")
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "767adc34dc218955")
+PROXY_HOST = os.getenv("PROXY_HOST", "gw.dataimpulse.com")
+PROXY_PORT = os.getenv("PROXY_PORT", "823")
+
+# Format proxy DataImpulse dengan country code ID (Indonesia)
+# Format: http://<username>__cr.id:<password>@<gateway>:<port>
+PROXY_URL = f"http://{PROXY_USERNAME}__cr.id:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+
+# ============ KONFIGURASI TELEGRAM ============
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-PROXY_HOST = os.getenv("PROXY_HOST", "95.135.92.164")
-PROXY_PORT_HTTP = os.getenv("PROXY_PORT_HTTP", "59100")
-PROXY_USERNAME = os.getenv("PROXY_USERNAME", "pulsaslot1888")
-PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
 
-# Validasi
-if not TOKEN:
-    print("❌ ERROR: TOKEN tidak ditemukan! Set environment variable TOKEN")
+if not TOKEN or not CHAT_ID:
+    print("❌ ERROR: TOKEN atau CHAT_ID tidak ditemukan!")
+    print("   Set di .env file:")
+    print("   TOKEN=your_telegram_token")
+    print("   CHAT_ID=your_chat_id")
     sys.exit(1)
 
-if not CHAT_ID:
-    print("❌ ERROR: CHAT_ID tidak ditemukan! Set environment variable CHAT_ID")
-    sys.exit(1)
-
-if not PROXY_PASSWORD:
-    print("⚠️  WARNING: PROXY_PASSWORD tidak ditemukan, proxy mungkin tidak berfungsi")
-
-# ============ PROXY SETUP ============
-if PROXY_PASSWORD:
-    PROXY_HTTP = f"http://{PROXY_USERNAME}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT_HTTP}"
-else:
-    PROXY_HTTP = f"http://{PROXY_HOST}:{PROXY_PORT_HTTP}"
-
+# ============ KONFIGURASI PROXY ============
 proxies = {
-    'http': PROXY_HTTP,
-    'https': PROXY_HTTP,
+    'http': PROXY_URL,
+    'https': PROXY_URL,
 }
 
-# ============ LOGGING SETUP ============
+# ============ LOGGING ============
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -74,150 +72,75 @@ except Exception as e:
     sys.exit(1)
 
 # ============ CHECKER CLASS ============
-class NawalaChecker:
-    """Multi-method checker untuk TrustPositif/Nawala"""
+class TrustPositifChecker:
+    """Checker untuk TrustPositif menggunakan proxy DataImpulse"""
     
     def __init__(self):
         self.session = requests.Session()
         self.session.proxies.update(proxies)
-        self.session.timeout = 15
+        self.session.timeout = 30
         
-        # Headers
+        # Headers untuk meniru browser Indonesia
         self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         }
         
-        # DNS resolver untuk metode DNS
-        self.dns_servers = ['202.134.0.155', '202.134.2.155', '202.134.7.7']
+        self.base_url = "https://trustpositif.komdigi.go.id"
+        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
+        self.csrf_token = None
         
-    def check_via_dns(self, domain: str) -> Optional[bool]:
-        """Cek domain via DNS Nawala"""
+    def get_csrf_token(self) -> Optional[str]:
+        """Dapatkan CSRF token dari halaman utama"""
         try:
-            import dns.resolver
+            logger.info("🔑 Mengambil CSRF token...")
             
-            for dns_server in self.dns_servers:
-                try:
-                    resolver = dns.resolver.Resolver()
-                    resolver.nameservers = [dns_server]
-                    resolver.timeout = 3
-                    resolver.lifetime = 5
-                    
-                    try:
-                        resolver.resolve(domain, 'A')
-                        return True  # Domain bisa di-resolve = AMAN
-                    except dns.resolver.NXDOMAIN:
-                        return False  # Domain tidak ditemukan = BLOKIR
-                    except Exception:
-                        continue
-                        
-                except Exception:
-                    continue
-                    
-            return None  # Semua DNS gagal
-            
-        except ImportError:
-            logger.warning("⚠️ dnspython tidak terinstall, skip DNS check")
-            return None
-        except Exception as e:
-            logger.error(f"DNS error untuk {domain}: {e}")
-            return None
-    
-    def check_via_scraping(self, domain: str) -> Optional[bool]:
-        """Cek domain via scraping TrustPositif"""
-        try:
-            # Step 1: Dapatkan CSRF token
             response = self.session.get(
-                "https://trustpositif.komdigi.go.id/",
+                self.base_url,
                 headers=self.headers,
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                return None
-                
-            # Extract CSRF token
-            csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
-            if csrf_match:
-                csrf_token = csrf_match.group(1)
-            else:
-                # Fallback token
-                csrf_token = "3835f8d38d9c0a271d2d782a70113bc2"
-            
-            # Step 2: Kirim request cek domain
-            api_url = "https://trustpositif.komdigi.go.id/Rest_server/getrecordsname_home"
-            
-            data = {
-                'csrf_token': csrf_token,
-                'name': domain
-            }
-            
-            api_headers = self.headers.copy()
-            api_headers.update({
-                'X-Requested-With': 'XMLHttpRequest',
-                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                'Referer': 'https://trustpositif.komdigi.go.id/',
-                'Origin': 'https://trustpositif.komdigi.go.id'
-            })
-            
-            response = self.session.post(
-                api_url,
-                data=data,
-                headers=api_headers,
                 timeout=15
             )
             
             if response.status_code != 200:
+                logger.error(f"❌ Gagal load halaman: {response.status_code}")
                 return None
                 
-            # Parse response
-            if 'tidak ada' in response.text.lower():
-                return True  # AMAN
-            else:
-                return False  # BLOKIR
+            # Cari CSRF token
+            csrf_match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
+            if csrf_match:
+                self.csrf_token = csrf_match.group(1)
+                logger.info(f"✅ CSRF token ditemukan: {self.csrf_token[:10]}...")
+                return self.csrf_token
                 
-        except Exception as e:
-            logger.error(f"Scraping error untuk {domain}: {e}")
-            return None
-    
-    def check_via_trustpositif_api(self, domain: str) -> Optional[bool]:
-        """Cek via TrustPositif API (jika ada)"""
-        try:
-            # Endpoint API yang mungkin
-            api_urls = [
-                f"https://trustpositif.komdigi.go.id/api/check/{domain}",
-                f"https://trustpositif.komdigi.go.id/Rest_server/getrecordsname_home?name={domain}"
-            ]
-            
-            for url in api_urls:
-                try:
-                    response = self.session.get(url, headers=self.headers, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
-                        
-                        # Coba berbagai format response
-                        if isinstance(data, dict):
-                            if data.get('status') == 'blocked' or data.get('blocked') is True:
-                                return False
-                            elif data.get('status') == 'allowed' or data.get('blocked') is False:
-                                return True
-                                
-                except:
-                    continue
-                    
-            return None
+            # Fallback: coba dari meta tag
+            csrf_match = re.search(r'<meta[^>]+name="csrf-token"[^>]+content="([^"]+)"', response.text)
+            if csrf_match:
+                self.csrf_token = csrf_match.group(1)
+                logger.info(f"✅ CSRF token dari meta: {self.csrf_token[:10]}...")
+                return self.csrf_token
+                
+            # Fallback terakhir: gunakan token default
+            logger.warning("⚠️ CSRF token tidak ditemukan, menggunakan default")
+            self.csrf_token = "3835f8d38d9c0a271d2d782a70113bc2"
+            return self.csrf_token
             
         except Exception as e:
-            logger.error(f"API error untuk {domain}: {e}")
+            logger.error(f"❌ Error get CSRF: {e}")
             return None
     
     def check_domain(self, domain: str) -> Tuple[bool, str]:
         """
-        Cek domain dengan multiple methods
-        Returns: (is_blocked, method_used)
+        Cek satu domain di TrustPositif
+        Returns: (is_blocked, message)
         """
         domain = domain.strip().lower()
         
@@ -229,50 +152,130 @@ class NawalaChecker:
         
         logger.info(f"🔍 Checking: {domain}")
         
-        # Method 1: DNS Check (tercepat)
-        dns_result = self.check_via_dns(domain)
-        if dns_result is not None:
-            if dns_result:
-                logger.info(f"✅ {domain}: ALLOWED (DNS)")
-                return False, "DNS Check"
+        try:
+            # Ambil CSRF token jika belum ada
+            if not self.csrf_token:
+                if not self.get_csrf_token():
+                    return False, "Gagal mendapatkan CSRF token"
+            
+            # Data untuk request
+            data = {
+                'csrf_token': self.csrf_token,
+                'name': domain
+            }
+            
+            # Headers untuk AJAX request
+            api_headers = {
+                'User-Agent': self.headers['User-Agent'],
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': f'{self.base_url}/',
+                'Origin': self.base_url,
+                'Connection': 'keep-alive',
+            }
+            
+            # Kirim request
+            response = self.session.post(
+                self.api_url,
+                data=data,
+                headers=api_headers,
+                timeout=15
+            )
+            
+            logger.info(f"📡 Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                # Parse response
+                return self.parse_response(response.text, domain)
             else:
-                logger.warning(f"🚫 {domain}: BLOCKED (DNS)")
-                return True, "DNS Check"
-        
-        # Method 2: Scraping (fallback)
-        scrap_result = self.check_via_scraping(domain)
-        if scrap_result is not None:
-            if scrap_result:
-                logger.info(f"✅ {domain}: ALLOWED (Scraping)")
-                return False, "Scraping TrustPositif"
-            else:
-                logger.warning(f"🚫 {domain}: BLOCKED (Scraping)")
-                return True, "Scraping TrustPositif"
-        
-        # Method 3: API (last resort)
-        api_result = self.check_via_trustpositif_api(domain)
-        if api_result is not None:
-            if api_result:
-                logger.info(f"✅ {domain}: ALLOWED (API)")
-                return False, "TrustPositif API"
-            else:
-                logger.warning(f"🚫 {domain}: BLOCKED (API)")
-                return True, "TrustPositif API"
-        
-        # Semua method gagal
-        logger.warning(f"⚠️ {domain}: UNKNOWN (all methods failed)")
-        return False, "UNKNOWN (no method available)"
+                logger.error(f"❌ HTTP Error {response.status_code}")
+                return False, f"HTTP {response.status_code}"
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"❌ Timeout untuk {domain}")
+            return False, "Timeout"
+        except requests.exceptions.ConnectionError:
+            logger.error(f"❌ Connection error untuk {domain}")
+            return False, "Connection Error"
+        except Exception as e:
+            logger.error(f"❌ Error checking {domain}: {e}")
+            return False, str(e)
+    
+    def parse_response(self, response_text: str, domain: str) -> Tuple[bool, str]:
+        """Parse response dari TrustPositif"""
+        try:
+            # Coba parse sebagai JSON
+            try:
+                data = json.loads(response_text)
+                
+                if 'values' in data:
+                    for item in data['values']:
+                        if isinstance(item, dict):
+                            item_domain = item.get('Domain', '').strip().lower()
+                            status = item.get('Status', '').strip()
+                            
+                            if item_domain == domain.lower():
+                                if status == 'Tidak Ada':
+                                    logger.info(f"✅ {domain}: ALLOWED (aman)")
+                                    return False, "ALLOWED - Tidak diblokir"
+                                else:
+                                    logger.warning(f"🚫 {domain}: BLOCKED ({status})")
+                                    return True, f"BLOCKED - {status}"
+                
+                # Jika tidak ditemukan di values, cek di data lain
+                if 'data' in data:
+                    for item in data['data']:
+                        if isinstance(item, dict):
+                            item_domain = item.get('domain', '').strip().lower()
+                            if item_domain == domain.lower():
+                                status = item.get('status', '')
+                                if status in ['blocked', 'terblokir', 'nawala']:
+                                    return True, f"BLOCKED - {status}"
+                                else:
+                                    return False, f"ALLOWED - {status}"
+                
+                return False, "ALLOWED - Tidak ditemukan dalam database"
+                
+            except json.JSONDecodeError:
+                # Bukan JSON, coba parse HTML
+                if 'tidak ada' in response_text.lower():
+                    return False, "ALLOWED - Tidak diblokir"
+                elif domain.lower() in response_text.lower():
+                    # Cari status dalam HTML
+                    pattern = f'<td[^>]*>{domain}</td>.*?<td[^>]*>(.*?)</td>'
+                    match = re.search(pattern, response_text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        status = match.group(1).strip()
+                        if status.lower() != 'tidak ada':
+                            return True, f"BLOCKED - {status}"
+                    return True, "BLOCKED - Terdeteksi dalam sistem"
+                else:
+                    return False, "ALLOWED - Tidak ditemukan"
+                    
+        except Exception as e:
+            logger.error(f"❌ Parse error: {e}")
+            return False, f"Parse error: {e}"
     
     def check_domains_batch(self, domains: List[str]) -> List[Tuple[str, bool, str]]:
-        """Cek multiple domains sekaligus"""
+        """Cek multiple domains"""
         results = []
-        for domain in domains:
-            is_blocked, method = self.check_domain(domain)
-            results.append((domain, is_blocked, method))
+        
+        # Ambil CSRF token sekali untuk semua domain
+        if not self.csrf_token:
+            if not self.get_csrf_token():
+                logger.error("❌ Gagal mendapatkan CSRF token")
+                return [(d, False, "CSRF token failed") for d in domains]
+        
+        for i, domain in enumerate(domains):
+            is_blocked, message = self.check_domain(domain)
+            results.append((domain, is_blocked, message))
             
-            # Delay antar request untuk hindari rate limit
-            time.sleep(1)
-            
+            # Delay antar request
+            if i < len(domains) - 1:
+                time.sleep(1.5)
+        
         return results
 
 # ============ FUNGSI UTAMA ============
@@ -284,12 +287,13 @@ def baca_domain() -> List[str]:
             with open("domain.txt", "w") as f:
                 f.write("# Daftar domain untuk dicek\n")
                 f.write("# Satu domain per baris\n\n")
-                f.write("# Contoh:\n")
+                f.write("# Contoh domain yang aman:\n")
                 f.write("google.com\n")
                 f.write("facebook.com\n")
-                f.write("youtube.com\n")
-                f.write("twitter.com\n")
-                f.write("instagram.com\n")
+                f.write("youtube.com\n\n")
+                f.write("# Domain yang dicurigai diblokir:\n")
+                f.write("jendelatoto.lifestyle\n")
+                f.write("jendelatoto.living\n")
             logger.info("✅ File domain.txt dibuat dengan contoh")
             return []
         
@@ -326,7 +330,7 @@ async def kirim_status() -> None:
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🔧 **Methods:** DNS, Scraping, API\n\n"
+            f"🌐 **Proxy:** DataImpulse Indonesia\n\n"
             "_Bot mengecek domain setiap 15 menit_\n"
             "_Source: TrustPositif Kominfo_"
         )
@@ -353,7 +357,7 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
                 "**SEMUA DOMAIN AMAN!** 🎉\n\n"
                 f"📊 **Total Domain:** {total_domains}\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "Tidak ada domain yang terblokir."
+                "Tidak ada domain yang terblokir TrustPositif."
             )
             
             await application.bot.send_message(
@@ -367,7 +371,7 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
             # Format daftar domain terblokir
             domain_list = ""
             for i, (domain, method) in enumerate(blocked, 1):
-                domain_list += f"{i}. 🚫 `{domain}` ({method})\n"
+                domain_list += f"{i}. 🚫 `{domain}`\n   └ {method}\n"
             
             message = (
                 "🚨 *LAPORAN DOMAIN TERBLOKIR*\n\n"
@@ -375,13 +379,13 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: TrustPositif Kominfo_"
+                "_Sumber: TrustPositif Kominfo via DataImpulse Proxy_"
             )
             
             # Kirim pesan (potong jika terlalu panjang)
             if len(message) > 4096:
-                # Kirim per 20 domain
-                chunks = [blocked[i:i+20] for i in range(0, len(blocked), 20)]
+                # Kirim per 15 domain
+                chunks = [blocked[i:i+15] for i in range(0, len(blocked), 15)]
                 for i, chunk in enumerate(chunks, 1):
                     chunk_msg = f"🚨 *LAPORAN (Bagian {i}/{len(chunks)})*\n\n"
                     for j, (domain, method) in enumerate(chunk, 1):
@@ -411,7 +415,8 @@ async def cek_domain_job() -> None:
     """Job utama untuk mengecek domain"""
     try:
         logger.info("=" * 60)
-        logger.info("🔄 MEMULAI PEMERIKSAAN")
+        logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF")
+        logger.info(f"🌐 Proxy: {PROXY_HOST}:{PROXY_PORT} (DataImpulse Indonesia)")
         logger.info("=" * 60)
         
         # Baca domain
@@ -423,7 +428,21 @@ async def cek_domain_job() -> None:
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
         # Buat checker
-        checker = NawalaChecker()
+        checker = TrustPositifChecker()
+        
+        # Test proxy terlebih dahulu
+        logger.info("🔗 Testing proxy DataImpulse...")
+        try:
+            test_response = checker.session.get(
+                'https://api.ipify.org/',
+                timeout=10
+            )
+            ip = test_response.text.strip()
+            logger.info(f"✅ Proxy IP: {ip}")
+        except Exception as e:
+            logger.error(f"❌ Proxy test gagal: {e}")
+            await kirim_status_alert(f"⚠️ Proxy DataImpulse gagal: {e}")
+            return
         
         # Cek semua domain
         start_time = time.time()
@@ -433,10 +452,9 @@ async def cek_domain_job() -> None:
         # Hitung statistik
         total = len(results)
         blocked = sum(1 for _, is_blocked, _ in results if is_blocked)
-        unknown = sum(1 for _, is_blocked, _ in results if not is_blocked and 'UNKNOWN' in _[2])
         
         logger.info(f"⏱️ Waktu: {elapsed_time:.2f} detik")
-        logger.info(f"📊 Hasil: {blocked}/{total} terblokir, {unknown} unknown")
+        logger.info(f"📊 Hasil: {blocked}/{total} domain terblokir")
         
         # Kirim laporan
         await kirim_laporan(results, total)
@@ -448,6 +466,17 @@ async def cek_domain_job() -> None:
         logger.error(f"❌ Error dalam cek_domain_job: {e}")
         import traceback
         logger.error(traceback.format_exc())
+
+async def kirim_status_alert(message: str) -> None:
+    """Kirim alert status ke Telegram"""
+    try:
+        await application.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"⚠️ *Alert:* {message}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"❌ Gagal kirim alert: {e}")
 
 def run_async_job(job_func):
     """Wrapper untuk menjalankan async job dari schedule"""
@@ -467,19 +496,26 @@ async def schedule_runner():
             await asyncio.sleep(5)
 
 async def test_koneksi() -> bool:
-    """Test koneksi ke TrustPositif"""
+    """Test koneksi ke TrustPositif via proxy"""
     try:
-        logger.info("🔗 Testing koneksi ke trustpositif.komdigi.go.id...")
+        logger.info("🔗 Testing koneksi ke TrustPositif via DataImpulse...")
         
         response = requests.get(
             "https://trustpositif.komdigi.go.id/",
-            timeout=10,
-            proxies=proxies
+            timeout=15,
+            proxies=proxies,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         )
         
         if response.status_code == 200:
-            logger.info("✅ Koneksi BERHASIL")
-            return True
+            if 'TrustPositif' in response.text or 'Kominfo' in response.text:
+                logger.info("✅ Koneksi BERHASIL ke TrustPositif")
+                return True
+            else:
+                logger.warning("⚠️ Response OK tapi halaman tidak sesuai")
+                return False
         else:
             logger.warning(f"⚠️ HTTP Status: {response.status_code}")
             return False
@@ -495,14 +531,30 @@ async def main():
     print("=" * 60)
     print(f"📱 Bot Token: {TOKEN[:10]}...{TOKEN[-5:]}")
     print(f"📱 Chat ID: {CHAT_ID}")
-    print(f"🌐 Proxy: {PROXY_HOST}:{PROXY_PORT_HTTP}")
+    print(f"🌐 Proxy: DataImpulse Indonesia ({PROXY_HOST}:{PROXY_PORT})")
     print("=" * 60 + "\n")
     
     logger.info("Bot starting...")
     
-    # Test koneksi
+    # Test proxy
+    logger.info("Testing proxy DataImpulse...")
+    try:
+        test_response = requests.get(
+            'https://api.ipify.org/',
+            proxies=proxies,
+            timeout=10
+        )
+        proxy_ip = test_response.text.strip()
+        logger.info(f"✅ Proxy IP: {proxy_ip}")
+        print(f"🌐 Proxy IP: {proxy_ip}")
+    except Exception as e:
+        logger.error(f"❌ Proxy test gagal: {e}")
+        print(f"❌ Proxy test gagal: {e}")
+        print("   Periksa kredensial proxy DataImpulse Anda!")
+    
+    # Test koneksi ke TrustPositif
     if not await test_koneksi():
-        logger.warning("⚠️ Koneksi bermasalah, bot tetap berjalan...")
+        logger.warning("⚠️ Koneksi ke TrustPositif bermasalah, bot tetap berjalan...")
     
     # Kirim status awal
     await kirim_status()
@@ -523,6 +575,7 @@ async def main():
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
+    logger.info("📍 Proxy: DataImpulse Indonesia")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     # Jalankan schedule runner
@@ -533,7 +586,6 @@ if __name__ == "__main__":
     try:
         import schedule
         import requests
-        import dns.resolver
         from telegram import __version__
         logger.info(f"✅ Dependencies OK (telegram-bot v{__version__})")
     except ImportError as e:
