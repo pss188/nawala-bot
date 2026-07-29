@@ -30,16 +30,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 # ============ KONFIGURASI PROXY DATAIMPULSE ============
-PROXY_USERNAME = os.getenv("PROXY_USERNAME", "986a4990d6e126d77bf9")
-PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "767adc34dc218955")
+# Data dari dashboard DataImpulse
+PROXY_USERNAME = "986a4990d6e126d77bf9"
+PROXY_PASSWORD = "767adc34dc218955"
+PROXY_HOST = "gw.dataimpulse.com"
+PROXY_PORT = "823"
 
-# Multiple gateway options (coba satu per satu)
-GATEWAYS = [
-    ("gw.dataimpulse.com", "823"),
-    ("74.81.81.81", "823"),
-    ("gw.dataimpulse.com", "824"),
-    ("74.81.81.81", "824"),
-]
+# Format proxy DataImpulse dengan country code ID (Indonesia)
+# Format: http://<username>__cr.id:<password>@<gateway>:<port>
+PROXY_URL = f"http://{PROXY_USERNAME}__cr.id:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
 
 # ============ KONFIGURASI TELEGRAM ============
 TOKEN = os.getenv("TOKEN")
@@ -51,6 +50,12 @@ if not TOKEN or not CHAT_ID:
     print("   TOKEN=your_telegram_token")
     print("   CHAT_ID=your_chat_id")
     sys.exit(1)
+
+# ============ KONFIGURASI PROXY ============
+proxies = {
+    'http': PROXY_URL,
+    'https': PROXY_URL,
+}
 
 # ============ LOGGING ============
 logging.basicConfig(
@@ -71,33 +76,14 @@ except Exception as e:
     logger.error(f"❌ Gagal setup bot: {e}")
     sys.exit(1)
 
-# ============ PROXY MANAGER ============
-class ProxyManager:
-    """Manajemen proxy dengan multiple gateway dan retry"""
+# ============ CHECKER CLASS ============
+class TrustPositifChecker:
+    """Checker untuk TrustPositif menggunakan proxy DataImpulse"""
     
     def __init__(self):
-        self.current_gateway_index = 0
-        self.gateways = GATEWAYS
-        self.proxy_url = None
-        self.session = None
-        self.is_connected = False
+        self.session = requests.Session()
         
-    def get_proxy_url(self, gateway_index: int = None) -> str:
-        """Dapatkan URL proxy untuk gateway tertentu"""
-        if gateway_index is None:
-            gateway_index = self.current_gateway_index
-            
-        host, port = self.gateways[gateway_index]
-        
-        # Format: username__cr.id:password@host:port
-        proxy_url = f"http://{PROXY_USERNAME}__cr.id:{PROXY_PASSWORD}@{host}:{port}"
-        return proxy_url
-    
-    def create_session(self, gateway_index: int = None) -> requests.Session:
-        """Buat session dengan retry mechanism"""
-        session = requests.Session()
-        
-        # Retry strategy
+        # Setup retry strategy
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
@@ -105,82 +91,13 @@ class ProxyManager:
             allowed_methods=["GET", "POST"]
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
         
-        # Proxy
-        proxy_url = self.get_proxy_url(gateway_index)
-        session.proxies = {
-            'http': proxy_url,
-            'https': proxy_url,
-        }
-        
-        # Settings
-        session.timeout = 30
-        session.verify = False
-        session.trust_env = False
-        
-        return session, proxy_url
-    
-    def test_connection(self) -> bool:
-        """Test koneksi proxy dengan multiple gateway"""
-        logger.info("🔗 Testing proxy DataImpulse...")
-        
-        for i in range(len(self.gateways)):
-            try:
-                logger.info(f"   Testing gateway {i+1}/{len(self.gateways)}: {self.gateways[i][0]}:{self.gateways[i][1]}")
-                
-                session, proxy_url = self.create_session(i)
-                
-                # Test ke api.ipify.org
-                response = session.get(
-                    'https://api.ipify.org/',
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    ip = response.text.strip()
-                    logger.info(f"✅ Proxy connected! IP: {ip}")
-                    logger.info(f"   Gateway: {self.gateways[i][0]}:{self.gateways[i][1]}")
-                    
-                    # Simpan session yang berhasil
-                    self.session = session
-                    self.proxy_url = proxy_url
-                    self.current_gateway_index = i
-                    self.is_connected = True
-                    return True
-                    
-            except Exception as e:
-                logger.warning(f"   ❌ Gateway {i+1} failed: {str(e)[:50]}")
-                continue
-        
-        logger.error("❌ All gateways failed!")
-        return False
-    
-    def get_session(self) -> Optional[requests.Session]:
-        """Dapatkan session yang sudah terhubung"""
-        if not self.is_connected or not self.session:
-            if not self.test_connection():
-                return None
-        return self.session
-    
-    def get_proxy_info(self) -> str:
-        """Dapatkan informasi proxy yang sedang digunakan"""
-        if self.is_connected and self.current_gateway_index < len(self.gateways):
-            host, port = self.gateways[self.current_gateway_index]
-            return f"{host}:{port}"
-        return "Not connected"
-
-# ============ CHECKER CLASS ============
-class TrustPositifChecker:
-    """Checker untuk TrustPositif menggunakan proxy manager"""
-    
-    def __init__(self, proxy_manager: ProxyManager):
-        self.proxy_manager = proxy_manager
-        self.session = None
-        self.base_url = "https://trustpositif.komdigi.go.id"
-        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
-        self.csrf_token = None
+        self.session.proxies.update(proxies)
+        self.session.timeout = 30
+        self.session.verify = False
+        self.session.trust_env = False
         
         # Headers untuk meniru browser Indonesia
         self.headers = {
@@ -190,23 +107,16 @@ class TrustPositifChecker:
             'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
         }
+        
+        self.base_url = "https://trustpositif.komdigi.go.id"
+        self.api_url = f"{self.base_url}/Rest_server/getrecordsname_home"
+        self.csrf_token = None
         
     def get_csrf_token(self) -> Optional[str]:
         """Dapatkan CSRF token dari halaman utama"""
         try:
             logger.info("🔑 Mengambil CSRF token...")
-            
-            # Dapatkan session dari proxy manager
-            self.session = self.proxy_manager.get_session()
-            if not self.session:
-                logger.error("❌ No active proxy session")
-                return None
             
             response = self.session.get(
                 self.base_url,
@@ -234,7 +144,7 @@ class TrustPositifChecker:
             logger.error(f"❌ Error get CSRF: {e}")
             return None
     
-    def check_domain(self, domain: str, retry_count: int = 0) -> Tuple[bool, str]:
+    def check_domain(self, domain: str) -> Tuple[bool, str]:
         """
         Cek satu domain di TrustPositif
         Returns: (is_blocked, message)
@@ -250,15 +160,10 @@ class TrustPositifChecker:
         logger.info(f"🔍 Checking: {domain}")
         
         try:
-            # Dapatkan session dari proxy manager
-            self.session = self.proxy_manager.get_session()
-            if not self.session:
-                return False, "No proxy connection"
-            
             # Ambil CSRF token jika belum ada
             if not self.csrf_token:
                 if not self.get_csrf_token():
-                    return False, "Failed to get CSRF token"
+                    return False, "Gagal mendapatkan CSRF token"
             
             # Data untuk request
             data = {
@@ -290,11 +195,6 @@ class TrustPositifChecker:
             
             if response.status_code == 200:
                 return self.parse_response(response.text, domain)
-            elif response.status_code == 403 and retry_count < 2:
-                # Coba refresh CSRF token
-                logger.warning("⚠️ 403 error, refreshing CSRF token...")
-                self.csrf_token = None
-                return self.check_domain(domain, retry_count + 1)
             else:
                 logger.error(f"❌ HTTP Error {response.status_code}")
                 return False, f"HTTP {response.status_code}"
@@ -324,22 +224,22 @@ class TrustPositifChecker:
                             
                             if item_domain == domain.lower():
                                 if status == 'Tidak Ada':
-                                    logger.info(f"✅ {domain}: ALLOWED")
-                                    return False, "ALLOWED"
+                                    logger.info(f"✅ {domain}: ALLOWED (aman)")
+                                    return False, "ALLOWED - Tidak diblokir"
                                 else:
                                     logger.warning(f"🚫 {domain}: BLOCKED ({status})")
                                     return True, f"BLOCKED - {status}"
                 
-                return False, "ALLOWED - Not found"
+                return False, "ALLOWED - Tidak ditemukan dalam database"
                 
             except json.JSONDecodeError:
                 # Bukan JSON, parse HTML
                 if 'tidak ada' in response_text.lower():
-                    return False, "ALLOWED"
+                    return False, "ALLOWED - Tidak diblokir"
                 elif domain.lower() in response_text.lower():
-                    return True, "BLOCKED - Detected"
+                    return True, "BLOCKED - Terdeteksi dalam sistem"
                 else:
-                    return False, "ALLOWED - Not found"
+                    return False, "ALLOWED - Tidak ditemukan"
                     
         except Exception as e:
             logger.error(f"❌ Parse error: {e}")
@@ -399,21 +299,20 @@ def baca_domain() -> List[str]:
         logger.error(f"❌ Error membaca domain: {e}")
         return []
 
-async def kirim_status(proxy_manager: ProxyManager) -> None:
+async def kirim_status() -> None:
     """Kirim status bot"""
     try:
         domains = baca_domain()
         domain_count = len(domains)
         waktu = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-        proxy_info = proxy_manager.get_proxy_info()
         
         message = (
             "🤖 *AMAROK Nawala Checker Bot*\n\n"
             f"✅ **Status:** Aktif & Berjalan\n"
             f"⏰ **Waktu:** {waktu}\n"
             f"📊 **Domain:** {domain_count} domain terdaftar\n"
-            f"🌐 **Proxy:** DataImpulse ({proxy_info})\n"
-            f"📡 **Status:** {'✅ Connected' if proxy_manager.is_connected else '❌ Disconnected'}\n\n"
+            f"🌐 **Proxy:** DataImpulse Indonesia (Residential)\n"
+            f"📡 **Status:** ✅ Connected\n\n"
             "_Bot mengecek domain setiap 15 menit_\n"
             "_Source: TrustPositif Kominfo_"
         )
@@ -461,7 +360,7 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
                 f"⏰ **Waktu:** {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}\n\n"
-                "_Sumber: TrustPositif Kominfo_"
+                "_Sumber: TrustPositif Kominfo via DataImpulse_"
             )
             
             if len(message) > 4096:
@@ -491,12 +390,12 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
     except Exception as e:
         logger.error(f"❌ Gagal kirim laporan: {e}")
 
-async def cek_domain_job(proxy_manager: ProxyManager) -> None:
+async def cek_domain_job() -> None:
     """Job utama untuk mengecek domain"""
     try:
         logger.info("=" * 60)
         logger.info("🔄 MEMULAI PEMERIKSAAN TRUSTPOSITIF")
-        logger.info(f"🌐 Proxy: {proxy_manager.get_proxy_info()}")
+        logger.info(f"🌐 Proxy: DataImpulse Indonesia (Residential)")
         logger.info("=" * 60)
         
         # Baca domain
@@ -508,7 +407,7 @@ async def cek_domain_job(proxy_manager: ProxyManager) -> None:
         logger.info(f"📋 Jumlah domain: {len(domains)}")
         
         # Buat checker
-        checker = TrustPositifChecker(proxy_manager)
+        checker = TrustPositifChecker()
         
         # Cek semua domain
         start_time = time.time()
@@ -533,11 +432,11 @@ async def cek_domain_job(proxy_manager: ProxyManager) -> None:
         import traceback
         logger.error(traceback.format_exc())
 
-def run_async_job(job_func, *args):
+def run_async_job(job_func):
     """Wrapper untuk menjalankan async job dari schedule"""
-    asyncio.create_task(job_func(*args))
+    asyncio.create_task(job_func())
 
-async def schedule_runner(proxy_manager: ProxyManager):
+async def schedule_runner():
     """Menjalankan schedule dalam loop asyncio"""
     while True:
         try:
@@ -550,6 +449,36 @@ async def schedule_runner(proxy_manager: ProxyManager):
             logger.error(f"❌ Error dalam schedule runner: {e}")
             await asyncio.sleep(5)
 
+async def test_koneksi() -> bool:
+    """Test koneksi ke TrustPositif via proxy"""
+    try:
+        logger.info("🔗 Testing koneksi ke TrustPositif via DataImpulse...")
+        
+        response = requests.get(
+            "https://trustpositif.komdigi.go.id/",
+            timeout=15,
+            proxies=proxies,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            verify=False
+        )
+        
+        if response.status_code == 200:
+            if 'TrustPositif' in response.text or 'Kominfo' in response.text:
+                logger.info("✅ Koneksi BERHASIL ke TrustPositif")
+                return True
+            else:
+                logger.warning("⚠️ Response OK tapi halaman tidak sesuai")
+                return False
+        else:
+            logger.warning(f"⚠️ HTTP Status: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Test koneksi GAGAL: {e}")
+        return False
+
 async def main():
     """Main function"""
     print("\n" + "=" * 60)
@@ -557,28 +486,42 @@ async def main():
     print("=" * 60)
     print(f"📱 Bot Token: {TOKEN[:10]}...{TOKEN[-5:]}")
     print(f"📱 Chat ID: {CHAT_ID}")
+    print(f"🌐 Proxy: DataImpulse Indonesia (Residential)")
+    print(f"   Host: {PROXY_HOST}:{PROXY_PORT}")
+    print(f"   Username: {PROXY_USERNAME}")
     print("=" * 60 + "\n")
     
     logger.info("Bot starting...")
     
-    # Setup proxy manager
-    proxy_manager = ProxyManager()
-    
     # Test proxy
-    if not proxy_manager.test_connection():
-        logger.error("❌ Proxy test failed! Bot will continue but may not work.")
-        print("❌ Proxy test failed! Periksa kredensial DataImpulse Anda.")
-    else:
-        logger.info("✅ Proxy connected successfully!")
-        print(f"✅ Proxy connected: {proxy_manager.get_proxy_info()}")
+    logger.info("Testing proxy DataImpulse...")
+    try:
+        test_response = requests.get(
+            'https://api.ipify.org/',
+            proxies=proxies,
+            timeout=10,
+            verify=False
+        )
+        proxy_ip = test_response.text.strip()
+        logger.info(f"✅ Proxy IP: {proxy_ip}")
+        print(f"🌐 Proxy IP: {proxy_ip}")
+    except Exception as e:
+        logger.error(f"❌ Proxy test gagal: {e}")
+        print(f"❌ Proxy test gagal: {e}")
+        print("   Periksa kredensial proxy DataImpulse Anda!")
+        print(f"   Error: {e}")
+    
+    # Test koneksi ke TrustPositif
+    if not await test_koneksi():
+        logger.warning("⚠️ Koneksi ke TrustPositif bermasalah, bot tetap berjalan...")
     
     # Kirim status awal
-    await kirim_status(proxy_manager)
+    await kirim_status()
     
     # Setup schedule
     logger.info("Setting up schedule...")
-    schedule.every(15).minutes.do(lambda: run_async_job(cek_domain_job, proxy_manager))
-    schedule.every(3).hours.do(lambda: run_async_job(kirim_status, proxy_manager))
+    schedule.every(15).minutes.do(lambda: run_async_job(cek_domain_job))
+    schedule.every(3).hours.do(lambda: run_async_job(kirim_status))
     
     logger.info("✅ Schedule: Check domains every 15 minutes")
     logger.info("✅ Schedule: Status report every 3 hours")
@@ -586,15 +529,16 @@ async def main():
     # Jalankan pengecekan pertama
     logger.info("Running first check in 3 seconds...")
     await asyncio.sleep(3)
-    await cek_domain_job(proxy_manager)
+    await cek_domain_job()
     
     logger.info("✅ Bot successfully started!")
     logger.info("📍 Domain checks: Every 15 minutes")
     logger.info("📍 Status reports: Every 3 hours")
+    logger.info("📍 Proxy: DataImpulse Indonesia (Residential)")
     logger.info("📍 Press Ctrl+C to stop\n")
     
     # Jalankan schedule runner
-    await schedule_runner(proxy_manager)
+    await schedule_runner()
 
 if __name__ == "__main__":
     # Cek dependencies
