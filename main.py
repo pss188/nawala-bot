@@ -355,7 +355,7 @@ async def kirim_laporan(results: List[Tuple[str, bool, str]], total_domains: int
                 domain_list += f"{i}. 🚫 `{domain}`\n"
             
             message = (
-                "❌❌❌❌❌❌❌❌❌*\n\n"
+                "❌❌❌❌❌❌❌❌❌\n\n"
                 f"**{blocked_count} DOMAIN TERBLOKIR**\n\n"
                 f"{domain_list}\n"
                 f"📊 **Statistik:** {blocked_count}/{total_domains} domain terblokir\n"
