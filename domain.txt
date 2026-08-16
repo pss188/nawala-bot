@@ -26,3 +26,6 @@ jendelatoto.lifestyle
 jendelatoto.living
 jendelatoto.beer
 jendelatoto.buzz
+boraytoto.site
+boraytoto.online
+boraytoto.cyou
